@@ -112,9 +112,17 @@ app.post('/api/confirm-payment', async (req, res) => {
 app.post('/api/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
 
+  if (!sig) {
+    return res.status(400).send('Missing Stripe signature');
+  }
+
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = await stripe.webhooks.constructEventAsync(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
