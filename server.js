@@ -85,6 +85,30 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 });
 
+app.post('/api/confirm-payment', async (req, res) => {
+  const { session_id } = req.body;
+
+  if (!session_id) {
+    return res.status(400).json({ error: 'Missing session_id' });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+
+    return res.json({
+      id: session.id,
+      status: session.status,
+      payment_status: session.payment_status,
+      customer_email: session.customer_email || null,
+      amount_total: session.amount_total || null,
+      currency: session.currency || null
+    });
+  } catch (error) {
+    console.error('Confirm payment error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
 
