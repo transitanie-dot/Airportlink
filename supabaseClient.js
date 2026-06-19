@@ -54,9 +54,13 @@ app.post("/api/confirm-payment", async (req, res) => {
 
     const payload = {
       user_id: metadata.user_id || null,
+      full_name: metadata.full_name || null,
+      phone_number: metadata.phone_number || null,
+      notes: metadata.notes || null,
       pickup: metadata.pickup || null,
       dropoff: metadata.dropoff || null,
       booking_date: metadata.booking_date || null,
+      booking_time: metadata.booking_time || null,
       passengers: Number(metadata.passengers || 1),
       price: cleanNumber(metadata.price),
       distance_km: cleanNumber(metadata.distance_km),
@@ -69,6 +73,7 @@ app.post("/api/confirm-payment", async (req, res) => {
           : null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      email: metadata.email || null,
     };
 
     const { error } = await supabase
