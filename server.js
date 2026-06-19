@@ -37,6 +37,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
     return res.status(400).json({ error: 'Missing amount, currency or booking' });
   }
 
+  const phoneCode = booking.phone_code || booking.phoneCode || '';
+  const phoneNumber = booking.phone_number || booking.phoneNumber || '';
+  const fullPhone = phoneCode || phoneNumber ? `+${phoneCode}${phoneNumber ? ` ${phoneNumber}` : ''}`.trim() : '';
+
   try {
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
@@ -60,7 +64,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
       metadata: {
         email: booking.email || '',
         full_name: booking.full_name || booking.fullName || '',
-        phone_number: booking.phone_number || booking.phoneNumber || '',
+        phone_code: phoneCode,
+        phone_number: phoneNumber,
+        phone: fullPhone,
         notes: booking.notes || '',
         pickup: booking.pickup || '',
         dropoff: booking.dropoff || '',
@@ -76,7 +82,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
         metadata: {
           email: booking.email || '',
           full_name: booking.full_name || booking.fullName || '',
-          phone_number: booking.phone_number || booking.phoneNumber || '',
+          phone_code: phoneCode,
+          phone_number: phoneNumber,
+          phone: fullPhone,
           notes: booking.notes || '',
           pickup: booking.pickup || '',
           dropoff: booking.dropoff || '',
@@ -142,7 +150,9 @@ app.post('/api/stripe-webhook', async (req, res) => {
     const bookingRow = {
       user_id: null,
       full_name: md.full_name || null,
+      phone_code: md.phone_code || null,
       phone_number: md.phone_number || null,
+      phone: md.phone || null,
       notes: md.notes || null,
       pickup: md.pickup || null,
       dropoff: md.dropoff || null,
