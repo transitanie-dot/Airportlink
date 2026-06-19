@@ -60,9 +60,12 @@ app.post('/api/create-checkout-session', async (req, res) => {
       metadata: {
         email: booking.email || '',
         full_name: booking.full_name || booking.fullName || '',
+        phone_number: booking.phone_number || booking.phoneNumber || '',
+        notes: booking.notes || '',
         pickup: booking.pickup || '',
         dropoff: booking.dropoff || '',
         booking_date: booking.booking_date || booking.date || '',
+        booking_time: booking.booking_time || booking.time || '',
         passengers: String(booking.passengers || ''),
         price: String(booking.price || amount || ''),
         distance_km: String(booking.distance_km || booking.distance || ''),
@@ -72,8 +75,13 @@ app.post('/api/create-checkout-session', async (req, res) => {
       payment_intent_data: {
         metadata: {
           email: booking.email || '',
+          full_name: booking.full_name || booking.fullName || '',
+          phone_number: booking.phone_number || booking.phoneNumber || '',
+          notes: booking.notes || '',
           pickup: booking.pickup || '',
-          dropoff: booking.dropoff || ''
+          dropoff: booking.dropoff || '',
+          booking_date: booking.booking_date || booking.date || '',
+          booking_time: booking.booking_time || booking.time || ''
         }
       }
     });
@@ -133,9 +141,13 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
     const bookingRow = {
       user_id: null,
+      full_name: md.full_name || null,
+      phone_number: md.phone_number || null,
+      notes: md.notes || null,
       pickup: md.pickup || null,
       dropoff: md.dropoff || null,
       booking_date: md.booking_date || null,
+      booking_time: md.booking_time || null,
       passengers: md.passengers ? parseInt(md.passengers, 10) : null,
       price: md.price ? Number(md.price) : null,
       distance_km: md.distance_km ? Number(md.distance_km) : null,
