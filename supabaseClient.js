@@ -55,7 +55,9 @@ app.post("/api/confirm-payment", async (req, res) => {
     const payload = {
       user_id: metadata.user_id || null,
       full_name: metadata.full_name || null,
+      phone_code: metadata.phone_code || metadata.phoneCode || null,
       phone_number: metadata.phone_number || null,
+      phone: metadata.phone || null,
       notes: metadata.notes || null,
       pickup: metadata.pickup || null,
       dropoff: metadata.dropoff || null,
