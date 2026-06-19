@@ -63,6 +63,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       customer_email: booking.email,
       metadata: {
         email: booking.email || '',
+        user_id: booking.user_id || '',
         full_name: booking.full_name || booking.fullName || '',
         phone_code: phoneCode,
         phone_number: phoneNumber,
@@ -82,6 +83,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       payment_intent_data: {
         metadata: {
           email: booking.email || '',
+          user_id: booking.user_id || '',
           full_name: booking.full_name || booking.fullName || '',
           phone_code: phoneCode,
           phone_number: phoneNumber,
@@ -113,13 +115,25 @@ app.post('/api/confirm-payment', async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.retrieve(session_id);
 
+    const paymentIntent =
+      typeof session.payment_intent === 'string'
+        ? await stripe.paymentIntents.retrieve(session.payment_intent)
+        : null;
+
+    const firstCharge =
+      paymentIntent?.charges?.data?.[0] || null;
+
     return res.json({
       id: session.id,
       status: session.status,
       payment_status: session.payment_status,
       customer_email: session.customer_email || null,
+      customer: typeof session.customer === 'string' ? session.customer : null,
       amount_total: session.amount_total || null,
-      currency: session.currency || null
+      currency: session.currency || null,
+      payment_intent_id: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+      receipt_url: firstCharge?.receipt_url || null,
+      payment_method_type: firstCharge?.payment_method_details?.type || null
     });
   } catch (error) {
     console.error('Confirm payment error:', error);
@@ -149,13 +163,25 @@ app.post('/api/stripe-webhook', async (req, res) => {
     const session = event.data.object;
     const md = session.metadata || {};
 
+    let paymentIntent = null;
+    let firstCharge = null;
+
+    if (typeof session.payment_intent === 'string') {
+      try {
+        paymentIntent = await stripe.paymentIntents.retrieve(session.payment_intent);
+        firstCharge = paymentIntent.charges?.data?.[0] || null;
+      } catch (e) {
+        console.error('PaymentIntent retrieve error:', e);
+      }
+    }
+
     const bookingRow = {
-      user_id: null,
+      user_id: md.user_id || null,
       full_name: md.full_name || null,
       phone_code: md.phone_code || null,
       phone_number: md.phone_number || null,
       phone: md.phone || null,
-      currency: md.currency || null,
+      currency: md.currency || session.currency || null,
       notes: md.notes || null,
       pickup: md.pickup || null,
       dropoff: md.dropoff || null,
@@ -165,18 +191,25 @@ app.post('/api/stripe-webhook', async (req, res) => {
       price: md.price ? Number(md.price) : null,
       distance_km: md.distance_km ? Number(md.distance_km) : null,
       duration_minutes: md.duration_minutes ? parseInt(md.duration_minutes, 10) : null,
-      status: md.status || 'paid',
+      status: md.status || session.payment_status || 'paid',
+      payment_status: session.payment_status || null,
+      amount_total: session.amount_total || null,
+      stripe_customer_id: typeof session.customer === 'string' ? session.customer : null,
       stripe_checkout_session_id: session.id,
       stripe_payment_intent_id: session.payment_intent || null,
+      receipt_url: firstCharge?.receipt_url || null,
+      payment_method_type: firstCharge?.payment_method_details?.type || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      email: md.email || null
+      email: md.email || session.customer_details?.email || session.customer_email || null
     };
 
-    const { error } = await supabase.from('bookings').insert(bookingRow);
+    const { error } = await supabase.from('bookings').upsert(bookingRow, {
+      onConflict: 'stripe_checkout_session_id'
+    });
 
     if (error) {
-      console.error('Supabase insert error:', error);
+      console.error('Supabase upsert error:', error);
       return res.status(500).send(`Supabase error: ${error.message}`);
     }
   }
