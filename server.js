@@ -2,6 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -95,6 +99,9 @@ app.use(cors({
 
 app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
+
+// Serve arquivos estáticos da pasta public/
+app.use(express.static('public'));
 
 app.get('/', (req, res) => {
   res.send('Backend is running');
