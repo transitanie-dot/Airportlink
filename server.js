@@ -97,11 +97,11 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Stripe-Signature']
 }));
 
+// Serve arquivos estáticos da pasta public/ (DEVE VIR PRIMEIRO!)
+app.use(express.static('public'));
+
 app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
-
-// Serve arquivos estáticos da pasta public/
-app.use(express.static('public'));
 
 app.get('/', (req, res) => {
   res.send('Backend is running');
