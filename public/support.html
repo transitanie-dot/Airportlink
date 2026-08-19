@@ -3,25 +3,142 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Support</title>
+<title>My Account</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script>
+(function blockingAuthCheck(){
+const expiresAt=Number(localStorage.getItem('airportlink_login_expires_at'));
+if(!expiresAt||Date.now()>=expiresAt){
+localStorage.removeItem('airportlink_login_expires_at');
+window.top.location.href='https://www.airportlink.app/login';
+}
+})();
+</script>
 <style>
-:root{--bg:#E8EBE7;--card:#ffffff;--primary:#333B50;--primary-soft:#eef2f7;--text:#111827;--muted:#6b7280;--border:#d6d9e0;--shadow:0 18px 45px rgba(16,24,40,.10);--success:#047857;--success-bg:#ecfdf5;--warning:#b45309;--warning-bg:#fff7ed;--neutral-bg:#f8fafc}
+:root{
+--bg:#E8EBE7;
+--card:#ffffff;
+--primary:#333B50;
+--primary-soft:#eef2f7;
+--text:#111827;
+--muted:#6b7280;
+--border:#d6d9e0;
+--shadow:0 18px 45px rgba(16,24,40,.10);
+--success:#047857;
+--success-bg:#ecfdf5;
+--warning:#b45309;
+--warning-bg:#fff7ed;
+--neutral-bg:#f8fafc
+}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:transparent;color:var(--text);font-family:Arial,sans-serif;min-height:100%}
 .wrapper{display:flex;min-height:100vh;padding:24px;gap:24px}
 .sidebar{width:260px;background:#333B50;color:#fff;padding:24px;display:flex;flex-direction:column;gap:16px;position:sticky;top:24px;height:calc(100vh - 48px);border-radius:24px;box-shadow:0 14px 30px rgba(51,59,80,.20)}
 .brand{font-weight:800;letter-spacing:.04em;font-size:20px;margin-bottom:12px}
 .sidebar .nav{display:flex;flex-direction:column;gap:8px}
-.nav-btn{background:transparent;border:0;color:#fff;padding:12px 14px;border-radius:12px;cursor:pointer;font-weight:700;text-align:left;font-size:14px;text-decoration:none;display:block}
+.nav-btn{background:transparent;border:0;color:#fff;padding:12px 14px;border-radius:12px;cursor:pointer;font-weight:700;text-align:left}
 .nav-btn.active{background:#44506a}
 .sidebar-actions{margin-top:auto;display:flex;flex-direction:column;gap:10px}
-.btn{border:0;border-radius:14px;padding:12px 16px;font-weight:800;cursor:pointer;font-size:14px}
+.btn{border:0;border-radius:14px;padding:12px 16px;font-weight:800;cursor:pointer}
 .btn-primary{background:#fff;color:#333B50}
 .btn-secondary{background:#44506a;color:#fff}
-.btn:disabled{opacity:.6;cursor:not-allowed}
-.main{flex:1;max-width:1080px;margin:0 auto;width:100%;display:flex;flex-direction:column}
+.main{flex:1;padding:0;max-width:980px;margin:0 auto;width:100%}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}
+.card{background:rgba(255,255,255,.96);border:1px solid rgba(214,217,224,.8);border-radius:24px;box-shadow:var(--shadow);padding:22px}
+.card.full{grid-column:1 / -1}
+h2{margin:0 0 6px;font-size:24px}
+.sub{margin:0 0 18px;color:var(--muted);font-size:14px}
+.field{margin-bottom:14px}
+label{display:block;margin:0 0 7px;font-size:13px;font-weight:700;color:#374151}
+input{width:100%;padding:14px 15px;border:1px solid var(--border);border-radius:14px;background:#fff;font-size:15px;outline:none}
+.field-error{display:none;margin-top:6px;color:#b42318;font-size:13px}
+.msg{display:none;margin-top:14px;padding:12px 14px;border-radius:12px;font-size:14px;line-height:1.45}
+.err{background:#fff1f2;color:#b42318;border:1px solid #fda29b}
+.ok{background:#ecfdf5;color:#047857;border:1px solid #bbf7d0}
+.empty{color:var(--muted);font-size:14px;padding:8px 0}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.help-section{display:grid;gap:18px}
+.help-card{background:#fff;border:1px solid var(--border);border-radius:18px;padding:20px}
+.help-card h3{margin:0 0 8px;font-size:18px;color:var(--primary)}
+.help-card p{margin:0 0 12px;color:var(--muted);font-size:14px;line-height:1.5}
+.help-links{display:grid;gap:8px;margin-top:12px}
+.help-link{color:var(--primary);font-weight:700;font-size:14px;text-decoration:none;display:inline-block}
+.help-link:hover{text-decoration:underline}
+.faq-item{border-bottom:1px solid var(--border);padding:14px 0}
+.faq-item:last-child{border-bottom:0}
+.faq-question{font-weight:700;color:var(--text);font-size:15px;margin:0 0 6px}
+.faq-answer{margin:0;color:var(--muted);font-size:14px;line-height:1.5}
 .hidden{display:none!important}
+.trip-list{display:grid;gap:14px}
+.trip-card{border:1px solid rgba(214,217,224,.9);border-radius:20px;background:linear-gradient(180deg,#ffffff 0%,#fbfcfe 100%);padding:18px 18px 16px;box-shadow:0 8px 22px rgba(16,24,40,.06)}
+.trip-card:hover{box-shadow:0 14px 28px rgba(16,24,40,.10)}
+.trip-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px}
+.trip-top-right{display:flex;align-items:center;gap:10px}
+.receipt-btn{width:30px;height:30px;border-radius:10px;border:1px solid rgba(214,217,224,.9);background:#fff;color:var(--primary);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 14px rgba(16,24,40,.06);transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
+.receipt-btn:hover{transform:translateY(-1px);box-shadow:0 10px 18px rgba(16,24,40,.10);background:#f8fafc}
+.receipt-btn svg{width:15px;height:15px;display:block}
+.receipt-overlay{position:fixed;inset:0;background:rgba(15,23,42,.52);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:12px;z-index:9999;overflow:hidden}
+.receipt-overlay.show{display:flex}
+.receipt-modal{width:min(100%,640px);height:auto;max-height:calc(100dvh - 24px);background:#fff;border-radius:24px;box-shadow:0 30px 80px rgba(15,23,42,.28);overflow:hidden;border:1px solid rgba(214,217,224,.85);display:flex;flex-direction:column}
+.receipt-head{padding:22px 24px;background:linear-gradient(180deg,#333B50,#252c3d);color:#fff;display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex:0 0 auto;position:sticky;top:0;z-index:2}
+.receipt-head h3{margin:0;font-size:20px}
+.receipt-head p{margin:6px 0 0;opacity:.82;font-size:13px;line-height:1.5}
+.receipt-close{border:0;background:rgba(255,255,255,.12);color:#fff;width:34px;height:34px;border-radius:12px;cursor:pointer;font-size:20px;line-height:1}
+.receipt-body{padding:22px 24px 24px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1 1 auto;min-height:0}
+.receipt-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px}
+.receipt-item{background:#f8fafc;border:1px solid rgba(214,217,224,.75);border-radius:16px;padding:12px 14px}
+.receipt-label{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.receipt-value{font-size:14px;font-weight:700;line-height:1.45;color:var(--text);word-break:break-word}
+.receipt-route{margin-top:8px;border:1px solid rgba(214,217,224,.75);border-radius:18px;padding:14px 16px;background:linear-gradient(180deg,#ffffff,#fbfcfe)}
+.receipt-route-line{display:grid;grid-template-columns:18px 1fr;gap:12px;align-items:start}
+.receipt-route-line + .receipt-route-line{margin-top:14px}
+.receipt-footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(214,217,224,.75)}
+.receipt-total{font-size:22px;font-weight:900;color:#111827}
+.receipt-note{font-size:12px;color:var(--muted);line-height:1.45;max-width:320px}
+.receipt-download{border:0;border-radius:14px;padding:12px 16px;font-weight:800;cursor:pointer;background:#333B50;color:#fff;white-space:nowrap}
+.receipt-download:hover{background:#252c3d}
+@media (max-width:640px){.receipt-overlay{align-items:flex-start;padding:12px}.receipt-modal{max-height:calc(100dvh - 24px);margin:0 auto}.receipt-head,.receipt-body{padding-left:18px;padding-right:18px}.receipt-footer{flex-direction:column;align-items:flex-start}.receipt-download{width:100%}.receipt-grid{grid-template-columns:1fr}}
+.trip-label{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border-radius:999px;background:var(--primary-soft);color:var(--primary);font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.trip-status{display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.03em;text-transform:capitalize;border:1px solid transparent}
+.trip-status.upcoming,.trip-status.confirmed,.trip-status.pending{background:var(--warning-bg);color:var(--warning);border-color:#fed7aa}
+.trip-status.completed{background:var(--success-bg);color:var(--success);border-color:#bbf7d0}
+.trip-status.cancelled{background:#fff1f2;color:#b42318;border-color:#fda29b}
+.trip-route{display:grid;gap:10px;margin-bottom:14px}
+.route-stop{display:grid;grid-template-columns:18px 1fr;gap:12px;align-items:start}
+.route-marker{width:18px;height:18px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;line-height:1;color:#fff;margin-top:2px}
+.route-marker.pickup{background:#0f766e;box-shadow:0 0 0 5px rgba(15,118,110,.10)}
+.route-marker.dropoff{background:#111827;box-shadow:0 0 0 5px rgba(17,24,39,.08)}
+.route-caption{font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.route-value{font-size:15px;font-weight:700;line-height:1.45;color:var(--text)}
+.trip-meta-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding-top:14px;border-top:1px solid rgba(214,217,224,.7)}
+.trip-meta-item{background:var(--neutral-bg);border:1px solid rgba(214,217,224,.65);border-radius:14px;padding:11px 12px}
+.trip-meta-label{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.trip-meta-value{font-size:14px;font-weight:700;color:var(--text);line-height:1.35;word-break:break-word}
+.trip-empty{display:flex;align-items:center;justify-content:center;min-height:140px;border:1px dashed rgba(214,217,224,.95);border-radius:20px;background:rgba(255,255,255,.65);color:var(--muted);font-size:14px;padding:24px;text-align:center}
+@media (max-width:820px){.wrapper{flex-direction:column;padding:16px;gap:16px}.sidebar{width:100%;height:auto;position:relative;top:0;border-radius:20px}.sidebar-actions{margin-top:12px}.grid{grid-template-columns:1fr}.help-section{grid-template-columns:1fr}.trip-top{flex-direction:column;align-items:flex-start}.trip-meta-grid{grid-template-columns:1fr}.trip-card{padding:16px}}
+html[data-theme="dark"] body{background:#11161D;color:#e7ebf2}
+html[data-theme="dark"] .card,html[data-theme="dark"] .help-card,html[data-theme="dark"] .trip-card,html[data-theme="dark"] .trip-meta-item,html[data-theme="dark"] .receipt-item,html[data-theme="dark"] .receipt-route{background:#151922;border-color:rgba(255,255,255,.08)}
+html[data-theme="dark"] .sidebar{background:#151922;box-shadow:0 14px 30px rgba(0,0,0,.35)}
+html[data-theme="dark"] .btn-primary{background:#e7ebf2;color:#11161D}
+html[data-theme="dark"] .btn-secondary{background:#222936;color:#e7ebf2}
+html[data-theme="dark"] input{background:#0f141c;color:#e7ebf2;border-color:rgba(255,255,255,.08)}
+html[data-theme="dark"] label{color:#dbe2ec}
+html[data-theme="dark"] .sub,html[data-theme="dark"] .help-card p,html[data-theme="dark"] .faq-answer,html[data-theme="dark"] .trip-meta-label,html[data-theme="dark"] .receipt-label,html[data-theme="dark"] .receipt-note,html[data-theme="dark"] .empty{color:#9aa3b2}
+html[data-theme="dark"] .help-card h3,html[data-theme="dark"] .faq-question,html[data-theme="dark"] .route-value,html[data-theme="dark"] .trip-meta-value,html[data-theme="dark"] .receipt-value,html[data-theme="dark"] .receipt-total{color:#e7ebf2}
+html[data-theme="dark"] .trip-status.upcoming,html[data-theme="dark"] .trip-status.confirmed,html[data-theme="dark"] .trip-status.pending{background:#2a1f0f;color:#f59e0b;border-color:#6b4f1d}
+html[data-theme="dark"] .trip-status.completed{background:#052e22;color:#34d399;border-color:#14532d}
+html[data-theme="dark"] .trip-status.cancelled{background:#2b1114;color:#fda4af;border-color:#7f1d1d}
+html[data-theme="dark"] .nav-btn.active{background:#2a3343}
+html[data-theme="dark"] .receipt-head{background:linear-gradient(180deg,#11161D,#0b1118)}
+html[data-theme="dark"] .receipt-close{background:rgba(255,255,255,.08)}
+html[data-theme="dark"] .receipt-download{background:#e7ebf2;color:#11161D}
+html[data-theme="dark"] .receipt-download:hover{background:#cfd6e2}
+html[data-theme="dark"] .route-marker.pickup{background:#14b8a6;box-shadow:0 0 0 5px rgba(20,184,166,.12)}
+html[data-theme="dark"] .route-marker.dropoff{background:#e7ebf2;color:#11161D;box-shadow:0 0 0 5px rgba(231,235,242,.08)}
+
+/* Support tab styles */
 .support-shell{display:flex;background:rgba(255,255,255,.96);border:1px solid rgba(214,217,224,.8);border-radius:24px;box-shadow:var(--shadow);height:calc(100vh - 48px);overflow:hidden}
 .chat-list-panel{width:320px;flex:0 0 320px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
 .chat-list-head{padding:22px 20px 14px;border-bottom:1px solid var(--border)}
@@ -76,34 +193,325 @@ html,body{margin:0;padding:0;background:transparent;color:var(--text);font-famil
 .modal-msg.err{background:#fff1f2;color:#b42318;border:1px solid #fda29b}
 .modal-actions{display:flex;gap:10px;margin-top:6px}
 .modal-actions .btn{flex:1;width:auto;text-align:center}
-@media (max-width:860px){.wrapper{flex-direction:column;padding:16px;gap:16px}.sidebar{width:100%;height:auto;position:relative;top:0;border-radius:20px}.sidebar-actions{margin-top:12px}.support-shell{flex-direction:column;height:auto;min-height:calc(100vh - 32px)}.chat-list-panel{width:100%;flex:0 0 auto;border-right:0;border-bottom:1px solid var(--border);max-height:260px}.chat-panel{min-height:60vh}}
-html[data-theme="dark"] body{background:#11161D;color:#e7ebf2}
-html[data-theme="dark"] .support-shell,html[data-theme="dark"] .modal-card{background:#151922;border-color:rgba(255,255,255,.08)}
-html[data-theme="dark"] .sidebar{background:#151922;box-shadow:0 14px 30px rgba(0,0,0,.35)}
-html[data-theme="dark"] .btn-primary{background:#e7ebf2;color:#11161D}
-html[data-theme="dark"] .btn-secondary{background:#222936;color:#e7ebf2}
-html[data-theme="dark"] .nav-btn.active{background:#2a3343}
-html[data-theme="dark"] .chat-list-head,html[data-theme="dark"] .chat-panel-head,html[data-theme="dark"] .chat-input-row,html[data-theme="dark"] .chat-resolved-note{border-color:rgba(255,255,255,.08)}
-html[data-theme="dark"] .chat-list-panel{border-color:rgba(255,255,255,.08)}
-html[data-theme="dark"] .chat-item{background:#151922}
-html[data-theme="dark"] .chat-item:hover{background:#1b212c}
-html[data-theme="dark"] .chat-item.active{background:#222936;border-color:rgba(255,255,255,.12)}
-html[data-theme="dark"] .chat-item-subject{color:#e7ebf2}
-html[data-theme="dark"] .chat-item-snippet,html[data-theme="dark"] .chat-item-time,html[data-theme="dark"] .chat-list-empty,html[data-theme="dark"] .chat-panel-head-info p,html[data-theme="dark"] .chat-empty-state,html[data-theme="dark"] .chat-resolved-note{color:#9aa3b2}
-html[data-theme="dark"] .chat-empty-state h3,html[data-theme="dark"] .chat-panel-head-info h3{color:#e7ebf2}
-html[data-theme="dark"] .chat-msg.admin{background:#1b212c;border-color:rgba(255,255,255,.08);color:#e7ebf2}
-html[data-theme="dark"] .chat-input-row textarea,html[data-theme="dark"] .field input,html[data-theme="dark"] .field textarea{background:#0f141c;color:#e7ebf2;border-color:rgba(255,255,255,.08)}
-html[data-theme="dark"] .field label{color:#dbe2ec}
-html[data-theme="dark"] .status-badge.open{background:#2a1f0f;color:#f59e0b;border-color:#6b4f1d}
-html[data-theme="dark"] .status-badge.resolved{background:#052e22;color:#34d399;border-color:#14532d}
-html[data-theme="dark"] .modal-head{background:linear-gradient(180deg,#11161D,#0b1118)}
-html[data-theme="dark"] .modal-close{background:rgba(255,255,255,.08)}
 </style>
 </head>
 <body>
-<div id="supportApp" class="hidden"><div class="wrapper"><div class="sidebar"><div class="brand">Support</div><div class="nav"><a class="nav-btn" href="https://www.airportlink.app/myaccount">My account</a><button class="nav-btn active" type="button">Support</button></div><div class="sidebar-actions"><button id="newChatBtn" class="btn btn-primary" type="button">+ New chat</button><button id="logoutBtn" class="btn btn-secondary" type="button">Log out</button></div></div><div class="main"><div class="support-shell"><div class="chat-list-panel"><div class="chat-list-head"><h2>Conversations</h2><p>Your support history with Airportlink.</p></div><div id="chatListScroll" class="chat-list-scroll"><div class="chat-list-empty">Loading conversations...</div></div></div><div class="chat-panel"><div id="chatEmptyState" class="chat-empty-state"><h3>No conversation selected</h3><p>Choose a conversation on the left, or start a new one to talk to our support team.</p><button id="emptyStateNewChatBtn" class="btn btn-secondary" type="button" style="width:auto;padding:12px 22px;">+ New chat</button></div><div id="chatActiveView" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0;"><div class="chat-panel-head"><div class="chat-panel-head-info"><h3 id="activeChatSubject">—</h3><p id="activeChatMeta">—</p></div><span id="activeChatStatus" class="status-badge open">Open</span></div><div id="messagesScroll" class="messages-scroll"></div><div id="resolvedNote" class="chat-resolved-note hidden">This conversation was marked as resolved. Sending a message will reopen it.</div><div class="chat-input-row"><textarea id="messageInput" rows="1" placeholder="Write your message..."></textarea><button id="sendMessageBtn" class="send-btn" type="button">Send</button></div></div></div></div></div></div></div><div id="newChatOverlay" class="modal-overlay" aria-hidden="true"><div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="newChatTitle"><div class="modal-head"><div><h3 id="newChatTitle">New conversation</h3><p>Tell us what you need help with.</p></div><button id="newChatCloseBtn" class="modal-close" type="button" aria-label="Close">&times;</button></div><div class="modal-body"><div class="field"><label for="newChatSubject">Subject</label><input id="newChatSubject" type="text" placeholder="e.g. Question about my booking"><div id="newChatSubjectError" class="field-error">Please enter a subject.</div></div><div class="field"><label for="newChatMessage">Message</label><textarea id="newChatMessage" placeholder="Describe your question or issue..."></textarea><div id="newChatMessageError" class="field-error">Please enter a message.</div></div><div id="newChatError" class="modal-msg err"></div><div class="modal-actions"><button id="newChatCancelBtn" class="btn btn-secondary" type="button" style="background:#eef2f7;color:#333B50;">Cancel</button><button id="newChatSubmitBtn" class="btn btn-secondary" type="button">Start conversation</button></div></div></div></div></div>
+<div id="accountApp">
+<div class="wrapper">
+<div class="sidebar">
+<div class="brand">My account</div>
+<div class="nav">
+<button class="nav-btn active" id="profileTabBtn" type="button">Profile</button>
+<button class="nav-btn" id="tripsTabBtn" type="button">My trips</button>
+<button class="nav-btn" id="supportTabBtn" type="button">Support</button>
+<button class="nav-btn" id="helpTabBtn" type="button">Help</button>
+</div>
+<div class="sidebar-actions">
+<button id="newBookingBtn" class="btn btn-primary" type="button">New booking</button>
+<button id="logoutBtn" class="btn btn-secondary" type="button">Log out</button>
+</div>
+</div>
+<div class="main">
+<div class="tab-content active" id="profileTab">
+<div class="grid">
+<div class="card">
+<h2>Profile</h2>
+<p class="sub">Edit your personal information.</p>
+<div class="field"><label for="fullName">Full name</label><input id="fullName" type="text" placeholder="Your name"><div id="fullNameError" class="field-error">Full name is required.</div></div>
+<div class="field"><label for="email">Email</label><input id="email" type="email" disabled></div>
+<button id="saveProfileBtn" class="btn btn-secondary" type="button" style="width:100%;">Save profile</button>
+<div id="profileError" class="msg err"></div>
+<div id="profileSuccess" class="msg ok"></div>
+</div>
+<div class="card">
+<h2>Billing details</h2>
+<p class="sub">Your billing information.</p>
+<div class="field"><label for="billingName">Name</label><input id="billingName" type="text" placeholder="Full name"><div id="billingNameError" class="field-error">Name is required.</div></div>
+<div class="field"><label for="billingStreet">Street address</label><input id="billingStreet" type="text" placeholder="Street, number"><div id="billingStreetError" class="field-error">Street address is required.</div></div>
+<div class="field"><label for="billingCity">City</label><input id="billingCity" type="text" placeholder="City"><div id="billingCityError" class="field-error">City is required.</div></div>
+<div class="field"><label for="billingPostal">Postal code</label><input id="billingPostal" type="text" placeholder="Postal code"><div id="billingPostalError" class="field-error">Postal code is invalid.</div></div>
+<div class="field"><label for="billingCountry">Country</label><input id="billingCountry" type="text" placeholder="Country"><div id="billingCountryError" class="field-error">Country is required.</div></div>
+<div class="field"><label for="phoneNumber">Phone number</label><input id="phoneNumber" type="text" placeholder="+351 ..."><div id="phoneNumberError" class="field-error">Phone number is invalid.</div></div>
+<button id="saveBillingBtn" class="btn btn-secondary" type="button" style="width:100%;">Save billing</button>
+<div id="billingError" class="msg err"></div>
+<div id="billingSuccess" class="msg ok"></div>
+</div>
+</div>
+</div>
+<div class="tab-content" id="tripsTab">
+<div class="card full"><h2>Future trips</h2><p class="sub">Your upcoming bookings will appear here.</p><div id="futureTripList" class="trip-list"></div></div>
+<div class="card full" style="margin-top:18px;"><h2>Past trips</h2><p class="sub">Your completed bookings will appear here.</p><div id="pastTripList" class="trip-list"></div></div>
+</div>
+
+<!-- Support Tab -->
+<div class="tab-content" id="supportTab">
+<div class="support-shell">
+<div class="chat-list-panel">
+<div class="chat-list-head">
+<h2>Conversations</h2>
+<p>Your support history with Airportlink.</p>
+</div>
+<div id="chatListScroll" class="chat-list-scroll">
+<div class="chat-list-empty">Loading conversations...</div>
+</div>
+</div>
+<div class="chat-panel">
+<div id="chatEmptyState" class="chat-empty-state">
+<h3>No conversation selected</h3>
+<p>Choose a conversation on the left, or start a new one to talk to our support team.</p>
+<button id="emptyStateNewChatBtn" class="btn btn-secondary" type="button" style="width:auto;padding:12px 22px;">+ New chat</button>
+</div>
+<div id="chatActiveView" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+<div class="chat-panel-head">
+<div class="chat-panel-head-info">
+<h3 id="activeChatSubject">—</h3>
+<p id="activeChatMeta">—</p>
+</div>
+<span id="activeChatStatus" class="status-badge open">Open</span>
+</div>
+<div id="messagesScroll" class="messages-scroll"></div>
+<div id="resolvedNote" class="chat-resolved-note hidden">This conversation was marked as resolved. Sending a message will reopen it.</div>
+<div class="chat-input-row">
+<textarea id="messageInput" rows="1" placeholder="Write your message..."></textarea>
+<button id="sendMessageBtn" class="send-btn" type="button">Send</button>
+</div>
+</div>
+</div>
+</div>
+<div id="newChatOverlay" class="modal-overlay" aria-hidden="true">
+<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="newChatTitle">
+<div class="modal-head">
+<div>
+<h3 id="newChatTitle">New conversation</h3>
+<p>Tell us what you need help with.</p>
+</div>
+<button id="newChatCloseBtn" class="modal-close" type="button" aria-label="Close">&times;</button>
+</div>
+<div class="modal-body">
+<div class="field">
+<label for="newChatSubject">Subject</label>
+<input id="newChatSubject" type="text" placeholder="e.g. Question about my booking">
+<div id="newChatSubjectError" class="field-error">Please enter a subject.</div>
+</div>
+<div class="field">
+<label for="newChatMessage">Message</label>
+<textarea id="newChatMessage" placeholder="Describe your question or issue..."></textarea>
+<div id="newChatMessageError" class="field-error">Please enter a message.</div>
+</div>
+<div id="newChatError" class="modal-msg err"></div>
+<div class="modal-actions">
+<button id="newChatCancelBtn" class="btn btn-secondary" type="button" style="background:#eef2f7;color:#333B50;">Cancel</button>
+<button id="newChatSubmitBtn" class="btn btn-secondary" type="button">Start conversation</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="tab-content" id="helpTab">
+<div class="help-section">
+<div class="card full"><h2>Help center</h2><p class="sub">Find answers to common questions or contact our support team.</p></div>
+<div class="help-card"><h3>Contact support</h3><p>Need help with your booking? Our support team is available 24/7 to assist you.</p><div class="help-links"><a class="help-link" href="#" id="supportLinkInternal">Support</a><span class="help-link" style="cursor:default;text-decoration:none;opacity:.7;">Phone: coming soon</span><span class="help-link" style="cursor:default;text-decoration:none;opacity:.7;">Chat support: coming soon</span></div></div>
+<div class="help-card"><h3>Common topics</h3><div class="help-links"><a class="help-link" href="#">How to book a ride</a><a class="help-link" href="#">Payment and pricing</a><a class="help-link" href="#">Changing or canceling a booking</a><a class="help-link" href="#">Lost or found items</a></div></div>
+<div class="help-card"><h3>Frequently asked questions</h3><div class="faq-item"><h4 class="faq-question">How do I book a ride?</h4><p class="faq-answer">Visit our homepage, enter your pickup and dropoff locations, select date and time, then complete your booking with payment.</p></div><div class="faq-item"><h4 class="faq-question">What payment methods do you accept?</h4><p class="faq-answer">We accept all major credit cards through Stripe. Payment is processed securely online.</p></div><div class="faq-item"><h4 class="faq-question">Can I change or cancel my booking?</h4><p class="faq-answer">Yes, you can change or cancel your booking up to 24 hours before your scheduled pickup. Contact support for assistance.</p></div><div class="faq-item"><h4 class="faq-question">How do I view my past trips?</h4><p class="faq-answer">Go to "My trips" in your account. Your past trips appear in the "Past trips" section.</p></div><div class="faq-item"><h4 class="faq-question">What if my driver doesn't show up?</h4><p class="faq-answer">Contact support immediately via email or chat. We'll help you resolve the situation quickly.</p></div></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div id="receiptOverlay" class="receipt-overlay" aria-hidden="true"><div class="receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receiptTitle"><div class="receipt-head"><div><h3 id="receiptTitle">Receipt</h3><p id="receiptSubtitle">Booking confirmation details</p></div><button id="receiptCloseBtn" class="receipt-close" type="button" aria-label="Close receipt">&times;</button></div><div class="receipt-body"><div class="receipt-grid"><div class="receipt-item"><div class="receipt-label">Booking ID</div><div class="receipt-value" id="receiptBookingId">—</div></div><div class="receipt-item"><div class="receipt-label">Status</div><div class="receipt-value" id="receiptStatus">—</div></div><div class="receipt-item"><div class="receipt-label">Date</div><div class="receipt-value" id="receiptDate">—</div></div><div class="receipt-item"><div class="receipt-label">Time</div><div class="receipt-value" id="receiptTime">—</div></div><div class="receipt-item"><div class="receipt-label">Passenger</div><div class="receipt-value" id="receiptName">—</div></div><div class="receipt-item"><div class="receipt-label">Email</div><div class="receipt-value" id="receiptEmail">—</div></div><div class="receipt-item"><div class="receipt-label">Passengers</div><div class="receipt-value" id="receiptPassengers">—</div></div><div class="receipt-item"><div class="receipt-label">Price</div><div class="receipt-value" id="receiptPrice">—</div></div></div><div class="receipt-route"><div class="receipt-route-line"><span class="route-marker pickup">P</span><div><div class="route-caption">Pick-up</div><div class="route-value" id="receiptPickup">—</div></div></div><div class="receipt-route-line"><span class="route-marker dropoff">D</span><div><div class="route-caption">Drop-off</div><div class="route-value" id="receiptDropoff">—</div></div></div><div class="receipt-footer"><div><div class="receipt-total" id="receiptTotal">—</div><div class="receipt-note">This is your booking receipt summary. For changes or cancellations, contact support or use your account details.</div></div><button id="receiptDownloadBtn" class="receipt-download" type="button">Download receipt</button></div></div></div></div></div>
 <script>
-const SUPABASE_URL='https://ujpagsccfiledbtfeyuq.supabase.co';const SUPABASE_ANON_KEY='sb_publishable_1Oc8DziBDPMs0MAxhrGGxw_qhTPIYOZ';const EMAIL_KEY='airportlink_user_email';const supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});const SESSION_KEY='airportlink_login_expires_at';const supportApp=document.getElementById('supportApp');const chatListScroll=document.getElementById('chatListScroll');const chatEmptyState=document.getElementById('chatEmptyState');const chatActiveView=document.getElementById('chatActiveView');const activeChatSubject=document.getElementById('activeChatSubject');const activeChatMeta=document.getElementById('activeChatMeta');const activeChatStatus=document.getElementById('activeChatStatus');const messagesScroll=document.getElementById('messagesScroll');const resolvedNote=document.getElementById('resolvedNote');const messageInput=document.getElementById('messageInput');const sendMessageBtn=document.getElementById('sendMessageBtn');const newChatBtn=document.getElementById('newChatBtn');const emptyStateNewChatBtn=document.getElementById('emptyStateNewChatBtn');const logoutBtn=document.getElementById('logoutBtn');const newChatOverlay=document.getElementById('newChatOverlay');const newChatCloseBtn=document.getElementById('newChatCloseBtn');const newChatCancelBtn=document.getElementById('newChatCancelBtn');const newChatSubmitBtn=document.getElementById('newChatSubmitBtn');const newChatSubject=document.getElementById('newChatSubject');const newChatMessage=document.getElementById('newChatMessage');const newChatSubjectError=document.getElementById('newChatSubjectError');const newChatMessageError=document.getElementById('newChatMessageError');const newChatError=document.getElementById('newChatError');let currentUser=null;let currentFullName='';let chats=[];let activeChatId=null;let renderedMessageIds=new Set();let chatsChannel=null;let messagesChannel=null;function escapeHtml(str){return String(str==null?'':str).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}function formatListTime(value){const d=new Date(value);if(Number.isNaN(d.getTime()))return'';const now=new Date();const sameDay=d.toDateString()===now.toDateString();return sameDay?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString([],{day:'2-digit',month:'short'});}function formatMsgTime(value){const d=new Date(value);if(Number.isNaN(d.getTime()))return'';return d.toLocaleString([],{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});}function statusLabel(status){return status==='resolved'?'Resolved':'Open';}function renderChatList(){if(!chats.length){chatListScroll.innerHTML='<div class="chat-list-empty">You have no conversations yet.<br>Start a new one whenever you need help.</div>';return;}chatListScroll.innerHTML=chats.map(chat=>{const active=chat.id===activeChatId?'active':'';const snippet=chat.last_message?escapeHtml(chat.last_message):'No messages yet';return`<div class="chat-item ${active}" data-id="${chat.id}"><div class="chat-item-top"><div class="chat-item-subject">${escapeHtml(chat.subject)}</div></div><div class="chat-item-snippet">${snippet}</div><div class="chat-item-bottom"><span class="chat-item-time">${formatListTime(chat.updated_at)}</span><span class="status-badge ${chat.status}">${statusLabel(chat.status)}</span></div></div>`;}).join('');chatListScroll.querySelectorAll('.chat-item').forEach(el=>{el.addEventListener('click',()=>selectChat(el.getAttribute('data-id')));});}async function loadChats(){if(!currentUser){console.warn('loadChats called but currentUser is null');return;}const{data,error}=await supabaseClient.from('support_chats').select('*').eq('email',currentUser.email).order('updated_at',{ascending:false});console.log('loadChats result:',{data,error,email:currentUser.email});if(error){chatListScroll.innerHTML='<div class="chat-list-empty">Could not load conversations.</div>';return;}chats=(data||[]).map(c=>({...c,last_message:c.last_message||''}));await Promise.all(chats.map(async c=>{const{data:lastMsg}=await supabaseClient.from('support_messages').select('message').eq('chat_id',c.id).order('created_at',{ascending:false}).limit(1).maybeSingle();if(lastMsg)c.last_message=lastMsg.message;}));chats.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));renderChatList();}function upsertLocalChat(row){const idx=chats.findIndex(c=>c.id===row.id);if(idx>=0){chats[idx]={...chats[idx],...row};}else{chats.unshift({...row,last_message:''});}chats.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));renderChatList();if(row.id===activeChatId)renderActiveChatHeader();}function renderActiveChatHeader(){const chat=chats.find(c=>c.id===activeChatId);if(!chat)return;activeChatSubject.textContent=chat.subject;activeChatMeta.textContent=`Opened ${formatListTime(chat.created_at)}`;activeChatStatus.textContent=statusLabel(chat.status);activeChatStatus.className='status-badge '+chat.status;resolvedNote.classList.toggle('hidden',chat.status!=='resolved');}function appendMessageBubble(msg){if(renderedMessageIds.has(msg.id))return;renderedMessageIds.add(msg.id);const bubble=document.createElement('div');bubble.className='chat-msg '+(msg.sender_type==='admin'?'admin':'customer');bubble.innerHTML=`${escapeHtml(msg.message)}<div class="chat-msg-meta">${msg.sender_type==='admin'?'Support team':'You'} · ${formatMsgTime(msg.created_at)}</div>`;messagesScroll.appendChild(bubble);messagesScroll.scrollTop=messagesScroll.scrollHeight;}async function selectChat(chatId){activeChatId=chatId;renderedMessageIds=new Set();messagesScroll.innerHTML='';chatEmptyState.classList.add('hidden');chatActiveView.classList.remove('hidden');chatActiveView.style.display='flex';renderChatList();renderActiveChatHeader();const{data,error}=await supabaseClient.from('support_messages').select('*').eq('chat_id',chatId).order('created_at',{ascending:true});if(!error&&data){data.forEach(appendMessageBubble);}subscribeToMessages(chatId);}function subscribeToMessages(chatId){if(messagesChannel){supabaseClient.removeChannel(messagesChannel);messagesChannel=null;}messagesChannel=supabaseClient.channel('support_messages_'+chatId).on('postgres_changes',{event:'INSERT',schema:'public',table:'support_messages',filter:`chat_id=eq.${chatId}`},payload=>{appendMessageBubble(payload.new);}).subscribe();}function subscribeToChats(){if(chatsChannel){supabaseClient.removeChannel(chatsChannel);chatsChannel=null;}chatsChannel=supabaseClient.channel('support_chats_'+(currentUser?.id||'anon')).on('postgres_changes',{event:'*',schema:'public',table:'support_chats',filter:`email=eq.${currentUser?.email||''}`},payload=>{if(payload.eventType==='DELETE'){chats=chats.filter(c=>c.id!==payload.old.id);renderChatList();return;}upsertLocalChat(payload.new);}).subscribe();}async function sendMessage(){const text=messageInput.value.trim();if(!text||!activeChatId)return;sendMessageBtn.disabled=true;const{data,error}=await supabaseClient.from('support_messages').insert({chat_id:activeChatId,sender_type:'customer',sender_name:currentFullName||currentUser.email,message:text}).select().single();sendMessageBtn.disabled=false;if(error){alert('Could not send your message. Please try again.');return;}messageInput.value='';messageInput.style.height='auto';appendMessageBubble(data);}messageInput.addEventListener('input',()=>{messageInput.style.height='auto';messageInput.style.height=Math.min(messageInput.scrollHeight,120)+'px';});messageInput.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}});sendMessageBtn.addEventListener('click',sendMessage);function openNewChatModal(){if(!currentUser){alert('You must be logged in to create a conversation.');return;}newChatSubject.value='';newChatMessage.value='';newChatSubjectError.style.display='none';newChatMessageError.style.display='none';newChatError.style.display='none';document.body.style.overflow='hidden';newChatOverlay.classList.add('show');newChatOverlay.setAttribute('aria-hidden','false');setTimeout(()=>newChatSubject.focus(),50);}function closeNewChatModal(){document.body.style.overflow='';newChatOverlay.classList.remove('show');newChatOverlay.setAttribute('aria-hidden','true');}newChatBtn.addEventListener('click',openNewChatModal);emptyStateNewChatBtn.addEventListener('click',openNewChatModal);newChatCloseBtn.addEventListener('click',closeNewChatModal);newChatCancelBtn.addEventListener('click',closeNewChatModal);newChatOverlay.addEventListener('click',e=>{if(e.target===newChatOverlay)closeNewChatModal();});async function submitNewChat(){if(!currentUser){console.error('submitNewChat called with currentUser null');return;}const subject=newChatSubject.value.trim();const message=newChatMessage.value.trim();let hasError=false;newChatSubjectError.style.display=subject?'none':'block';newChatMessageError.style.display=message?'none':'block';if(!subject||!message)hasError=true;newChatError.style.display='none';if(hasError)return;newChatSubmitBtn.disabled=true;const{data:chat,error:chatError}=await supabaseClient.from('support_chats').insert({email:currentUser.email,full_name:currentFullName||null,subject,status:'open'}).select().single();if(chatError){newChatError.textContent=chatError.message||'Could not start the conversation.';newChatError.style.display='block';newChatSubmitBtn.disabled=false;return;}const{error:msgError}=await supabaseClient.from('support_messages').insert({chat_id:chat.id,sender_type:'customer',sender_name:currentFullName||currentUser.email,message});newChatSubmitBtn.disabled=false;if(msgError){newChatError.textContent=msgError.message||'Could not send the first message.';newChatError.style.display='block';return;}closeNewChatModal();upsertLocalChat(chat);selectChat(chat.id);}newChatSubmitBtn.addEventListener('click',submitNewChat);logoutBtn.addEventListener('click',async()=>{localStorage.removeItem(SESSION_KEY);localStorage.removeItem(EMAIL_KEY);await supabaseClient.auth.signOut();window.top.location.href='https://www.airportlink.app/login';});window.addEventListener('message',(event)=>{const data=event.data||{};if(typeof data==='string'){document.documentElement.setAttribute('data-theme',data==='dark'?'dark':'light');return;}if(data.type==='theme'){document.documentElement.setAttribute('data-theme',data.value==='dark'?'dark':'light');}if(data.type==='ping'){window.parent.postMessage({type:'ready'},'*');return;}if(data.type==='set-user'&&data.email){console.log('Received set-user email:',data.email);localStorage.setItem(EMAIL_KEY,data.email);if(!currentUser){currentUser={id:'local-user',email:data.email};currentFullName=data.email;console.log('currentUser set from set-user:',currentUser);loadAccount();}}});async function loadAccount(){let storedEmail=localStorage.getItem(EMAIL_KEY);console.log('loadAccount: storedEmail',storedEmail);if(!storedEmail){chatListScroll.innerHTML='<div class="chat-list-empty">Please sign in to access support.</div>';supportApp.classList.remove('hidden');return false;}currentUser={id:'local-user',email:storedEmail};currentFullName=storedEmail;console.log('loadAccount: currentUser',currentUser);try{const{data:contact,error}=await supabaseClient.from('contacts').select('full_name').eq('email',currentUser.email).maybeSingle();console.log('loadAccount: contact',{data:contact,error});if(contact&&contact.full_name)currentFullName=contact.full_name;}catch(e){console.log('Erro ao buscar contact:',e);}await loadChats();subscribeToChats();return true;}(async()=>{console.log('Support init starting');const storedEmail=localStorage.getItem(EMAIL_KEY);console.log('Support: localStorage email',storedEmail);if(storedEmail){await loadAccount();}else{chatListScroll.innerHTML='<div class="chat-list-empty">Please sign in to access support.</div>';supportApp.classList.remove('hidden');}console.log('Final currentUser',currentUser);console.log('Final chats',chats);supportApp.classList.remove('hidden');})();
+const SUPABASE_URL='https://ujpagsccfiledbtfeyuq.supabase.co';
+const SUPABASE_ANON_KEY='sb_publishable_1Oc8DziBDPMs0MAxhrGGxw_qhTPIYOZ';
+const supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});
+const SESSION_KEY='airportlink_login_expires_at';
+const EMAIL_KEY='airportlink_user_email';
+const TWO_HOURS=2*60*60*1000;
+const accountApp=document.getElementById('accountApp');
+const fullNameEl=document.getElementById('fullName');
+const emailEl=document.getElementById('email');
+const billingNameEl=document.getElementById('billingName');
+const billingStreetEl=document.getElementById('billingStreet');
+const billingCityEl=document.getElementById('billingCity');
+const billingPostalEl=document.getElementById('billingPostal');
+const billingCountryEl=document.getElementById('billingCountry');
+const phoneNumberEl=document.getElementById('phoneNumber');
+const futureTripListEl=document.getElementById('futureTripList');
+const pastTripListEl=document.getElementById('pastTripList');
+const saveProfileBtn=document.getElementById('saveProfileBtn');
+const saveBillingBtn=document.getElementById('saveBillingBtn');
+const newBookingBtn=document.getElementById('newBookingBtn');
+const logoutBtn=document.getElementById('logoutBtn');
+const profileErrorEl=document.getElementById('profileError');
+const profileSuccessEl=document.getElementById('profileSuccess');
+const billingErrorEl=document.getElementById('billingError');
+const billingSuccessEl=document.getElementById('billingSuccess');
+const profileTabBtn=document.getElementById('profileTabBtn');
+const tripsTabBtn=document.getElementById('tripsTabBtn');
+const supportTabBtn=document.getElementById('supportTabBtn');
+const helpTabBtn=document.getElementById('helpTabBtn');
+const profileTab=document.getElementById('profileTab');
+const tripsTab=document.getElementById('tripsTab');
+const supportTab=document.getElementById('supportTab');
+const helpTab=document.getElementById('helpTab');
+const fullNameError=document.getElementById('fullNameError');
+const billingNameError=document.getElementById('billingNameError');
+const billingStreetError=document.getElementById('billingStreetError');
+const billingCityError=document.getElementById('billingCityError');
+const billingPostalError=document.getElementById('billingPostalError');
+const billingCountryError=document.getElementById('billingCountryError');
+const phoneNumberError=document.getElementById('phoneNumberError');
+const receiptOverlay=document.getElementById('receiptOverlay');
+const receiptCloseBtn=document.getElementById('receiptCloseBtn');
+const receiptDownloadBtn=document.getElementById('receiptDownloadBtn');
+const supportLink=document.getElementById('supportLink');
+const supportLinkInternal=document.getElementById('supportLinkInternal');
+
+// Support elements
+const chatListScroll=document.getElementById('chatListScroll');
+const chatEmptyState=document.getElementById('chatEmptyState');
+const chatActiveView=document.getElementById('chatActiveView');
+const activeChatSubject=document.getElementById('activeChatSubject');
+const activeChatMeta=document.getElementById('activeChatMeta');
+const activeChatStatus=document.getElementById('activeChatStatus');
+const messagesScroll=document.getElementById('messagesScroll');
+const resolvedNote=document.getElementById('resolvedNote');
+const messageInput=document.getElementById('messageInput');
+const sendMessageBtn=document.getElementById('sendMessageBtn');
+const newChatBtn=document.getElementById('newChatBtn');
+const emptyStateNewChatBtn=document.getElementById('emptyStateNewChatBtn');
+const newChatOverlay=document.getElementById('newChatOverlay');
+const newChatCloseBtn=document.getElementById('newChatCloseBtn');
+const newChatCancelBtn=document.getElementById('newChatCancelBtn');
+const newChatSubmitBtn=document.getElementById('newChatSubmitBtn');
+const newChatSubject=document.getElementById('newChatSubject');
+const newChatMessage=document.getElementById('newChatMessage');
+const newChatSubjectError=document.getElementById('newChatSubjectError');
+const newChatMessageError=document.getElementById('newChatMessageError');
+const newChatError=document.getElementById('newChatError');
+
+let currentUser=null;
+let currentReceipt=null;
+let chats=[];
+let activeChatId=null;
+let renderedMessageIds=new Set();
+let chatsChannel=null;
+let messagesChannel=null;
+
+function navigateTo(path){
+const email = localStorage.getItem(EMAIL_KEY);
+if (email) {
+console.log('Enviando set-user antes de navegar:', email);
+window.parent.postMessage({ type: 'set-user', email }, '*');
+}
+window.parent.postMessage({ type: 'navigate', path: path }, '*');
+}
+
+supportLink.addEventListener('click',(event)=>{
+event.preventDefault();
+supportTabBtn.click();
+});
+
+if(supportLinkInternal){
+supportLinkInternal.addEventListener('click',(event)=>{
+event.preventDefault();
+supportTabBtn.click();
+});
+}
+
+function showProfileError(text){profileErrorEl.textContent=text;profileErrorEl.style.display='block';profileSuccessEl.style.display='none'}
+function showProfileSuccess(text){profileSuccessEl.textContent=text;profileSuccessEl.style.display='block';profileErrorEl.style.display='none'}
+function clearProfileMsgs(){profileErrorEl.style.display='none';profileSuccessEl.style.display='none';profileErrorEl.textContent='';profileSuccessEl.textContent='';fullNameError.style.display='none'}
+function showBillingError(text){billingErrorEl.textContent=text;billingErrorEl.style.display='block';billingSuccessEl.style.display='none'}
+function showBillingSuccess(text){billingSuccessEl.textContent=text;billingSuccessEl.style.display='block';billingErrorEl.style.display='none'}
+function clearBillingMsgs(){billingErrorEl.style.display='none';billingSuccessEl.style.display='none';billingErrorEl.textContent='';billingSuccessEl.textContent='';[billingNameError,billingStreetError,billingCityError,billingPostalError,billingCountryError,phoneNumberError].forEach(el=>el.style.display='none')}
+function validPhone(phone){return phone.trim()===''||/^[+()0-9\s-]{7,20}$/.test(phone)}
+function validPostal(postal){return postal.trim()===''||/^[A-Za-z0-9\-\s]{3,12}$/.test(postal)}
+function nonEmpty(v){return v.trim().length>0}
+function setFieldError(el,show){el.style.display=show?'block':'none'}
+function formatTripDate(value){if(!value)return'—';const d=new Date(value);return Number.isNaN(d.getTime())?value:d.toLocaleDateString()}
+function formatTripTime(value){if(!value)return'—';const d=new Date(value);return Number.isNaN(d.getTime())?value:d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+function formatPriceWithCurrency(price,currency){if(price===null||price===undefined||price==='')return'—';const amount=Number(String(price).replace(',', '.'));if(Number.isNaN(amount))return currency?`${price} ${currency}`:String(price);if(!currency)return String(price);try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:String(currency).toUpperCase()}).format(amount)}catch{return `${amount} ${currency}`}}
+function normalizeStatus(status){return(status||'pending').toLowerCase().replace(/[^a-z0-9]+/g,'-')}
+function openReceipt(trip){currentReceipt=trip;document.getElementById('receiptBookingId').textContent=trip.id?`#${trip.id}`:'—';document.getElementById('receiptStatus').textContent=trip.status||'Pending';document.getElementById('receiptDate').textContent=formatTripDate(trip.booking_date);document.getElementById('receiptTime').textContent=formatTripTime(trip.booking_date);document.getElementById('receiptName').textContent=trip.full_name||trip.name||currentUser?.user_metadata?.full_name||'—';document.getElementById('receiptEmail').textContent=trip.email||currentUser?.email||'—';document.getElementById('receiptPassengers').textContent=trip.passengers?String(trip.passengers):'—';document.getElementById('receiptPrice').textContent=formatPriceWithCurrency(trip.price,trip.currency);document.getElementById('receiptPickup').textContent=trip.pickup||'Pickup location pending';document.getElementById('receiptDropoff').textContent=trip.dropoff||'Destination pending';document.getElementById('receiptTotal').textContent=trip.price?`Total: ${formatPriceWithCurrency(trip.price,trip.currency)}`:'Total: —';document.body.style.overflow='hidden';receiptOverlay.classList.add('show');receiptOverlay.setAttribute('aria-hidden','false')}
+function closeReceipt(){document.body.style.overflow='';receiptOverlay.classList.remove('show');receiptOverlay.setAttribute('aria-hidden','true')}
+function downloadReceipt(){if(!currentReceipt||!window.jspdf?.jsPDF)return;const{jsPDF}=window.jspdf;const doc=new jsPDF({unit:'mm',format:'a4'});const pageWidth=doc.internal.pageSize.getWidth();const marginX=18;const contentWidth=pageWidth-marginX*2;const dark=[51,59,80];const text=[17,24,39];const muted=[107,114,128];const border=[214,217,224];const bg=[248,250,252];const drawBox=(x,y,w,h,fill=[255,255,255])=>{doc.setFillColor(...fill);doc.setDrawColor(...border);doc.roundedRect(x,y,w,h,3,3,'FD')};const addLabelValue=(x,y,w,label,value)=>{drawBox(x,y,w,18,bg);doc.setTextColor(...muted);doc.setFontSize(8);doc.setFont('helvetica','bold');doc.text(label.toUpperCase(),x+3,y+5);doc.setTextColor(...text);doc.setFontSize(11);doc.setFont('helvetica','bold');const lines=doc.splitTextToSize(String(value||'—'),w-6);doc.text(lines,x+3,y+11)};doc.setFillColor(...dark);doc.rect(0,0,pageWidth,30,'F');doc.setFillColor(51,59,79);doc.roundedRect(marginX,6,82,14,2,2,'F');doc.setTextColor(255,255,255);doc.setFont('helvetica','bold');doc.setFontSize(14);doc.text('Airportlink',marginX+5,16);doc.setTextColor(255,255,255);doc.setFont('helvetica','bold');doc.setFontSize(18);doc.text('Receipt',marginX+44,15);doc.setFontSize(10);doc.setFont('helvetica','normal');doc.text('Booking confirmation details',marginX+44,21);doc.setTextColor(...text);doc.setFont('helvetica','normal');doc.setFontSize(11);let y=40;addLabelValue(marginX,y,52,'Booking ID',currentReceipt.id?`#${currentReceipt.id}`:'—');addLabelValue(marginX+56,y,48,'Status',currentReceipt.status||'Pending');addLabelValue(marginX+108,y,40,'Date',formatTripDate(currentReceipt.booking_date));y+=24;addLabelValue(marginX,y,52,'Time',formatTripTime(currentReceipt.booking_date));addLabelValue(marginX+56,y,48,'Passengers',currentReceipt.passengers??'—');addLabelValue(marginX+108,y,40,'Price',formatPriceWithCurrency(currentReceipt.price,currentReceipt.currency));y+=24;drawBox(marginX,y,contentWidth,22,bg);doc.setTextColor(...muted);doc.setFontSize(8);doc.setFont('helvetica','bold');doc.text('PASSENGER',marginX+3,y+5);doc.setTextColor(...text);doc.setFontSize(11);doc.setFont('helvetica','bold');doc.text(doc.splitTextToSize(currentReceipt.full_name||currentReceipt.name||currentUser?.user_metadata?.full_name||'—',contentWidth-6),marginX+3,y+11);y+=28;drawBox(marginX,y,contentWidth,22,bg);doc.setTextColor(...muted);doc.setFontSize(8);doc.setFont('helvetica','bold');doc.text('EMAIL',marginX+3,y+5);doc.setTextColor(...text);doc.setFontSize(11);doc.setFont('helvetica','bold');doc.text(doc.splitTextToSize(currentReceipt.email||currentUser?.email||'—',contentWidth-6),marginX+3,y+11);y+=28;drawBox(marginX,y,contentWidth,34,[255,255,255]);doc.setTextColor(...muted);doc.setFontSize(8);doc.setFont('helvetica','bold');doc.text('PICK-UP',marginX+4,y+6);doc.setTextColor(...text);doc.setFontSize(11);doc.setFont('helvetica','normal');doc.text(doc.splitTextToSize(currentReceipt.pickup||'Pickup location pending',contentWidth-8),marginX+4,y+12);y+=40;drawBox(marginX,y,contentWidth,34,[255,255,255]);doc.setTextColor(...muted);doc.setFontSize(8);doc.setFont('helvetica','bold');doc.text('DROP-OFF',marginX+4,y+6);doc.setTextColor(...text);doc.setFontSize(11);doc.setFont('helvetica','normal');doc.text(doc.splitTextToSize(currentReceipt.dropoff||'Destination pending',contentWidth-8),marginX+4,y+12);y+=44;doc.setFillColor(...dark);doc.roundedRect(marginX,y,contentWidth,18,3,3,'F');doc.setTextColor(255,255,255);doc.setFont('helvetica','bold');doc.setFontSize(13);doc.text(`Total: ${formatPriceWithCurrency(currentReceipt.price,currentReceipt.currency)}`,marginX+4,y+12);y+=28;doc.setTextColor(...muted);doc.setFont('helvetica','normal');doc.setFontSize(9);const note='This is your booking receipt summary. For changes or cancellations, contact support or use your account details.';doc.text(doc.splitTextToSize(note,contentWidth),marginX,y);doc.save(`receipt-${currentReceipt.id||'booking'}.pdf`)}
+
+profileTabBtn.addEventListener('click',()=>{profileTabBtn.classList.add('active');tripsTabBtn.classList.remove('active');supportTabBtn.classList.remove('active');helpTabBtn.classList.remove('active');profileTab.classList.add('active');tripsTab.classList.remove('active');supportTab.classList.remove('active');helpTab.classList.remove('active')});
+tripsTabBtn.addEventListener('click',()=>{tripsTabBtn.classList.add('active');profileTabBtn.classList.remove('active');supportTabBtn.classList.remove('active');helpTabBtn.classList.remove('active');tripsTab.classList.add('active');profileTab.classList.remove('active');supportTab.classList.remove('active');helpTab.classList.remove('active')});
+supportTabBtn.addEventListener('click',()=>{supportTabBtn.classList.add('active');profileTabBtn.classList.remove('active');tripsTabBtn.classList.remove('active');helpTabBtn.classList.remove('active');supportTab.classList.add('active');profileTab.classList.remove('active');tripsTab.classList.remove('active');helpTab.classList.remove('active');if(currentUser){loadSupportChats();}});
+helpTabBtn.addEventListener('click',()=>{helpTabBtn.classList.add('active');profileTabBtn.classList.remove('active');tripsTabBtn.classList.remove('active');supportTabBtn.classList.remove('active');helpTab.classList.add('active');profileTab.classList.remove('active');tripsTab.classList.remove('active');supportTab.classList.remove('active')});
+
+function renderTripCard(trip,type){const status=normalizeStatus(trip.status);const badgeText=type==='future'?'Upcoming trip':'Completed trip';return `<article class="trip-card"><div class="trip-top"><span class="trip-label">${badgeText}</span><div class="trip-top-right"><span class="trip-status ${status}">${trip.status||(type==='future'?'pending':'completed')}</span><button class="receipt-btn" type="button" aria-label="View receipt" title="View receipt" onclick='openReceipt(${JSON.stringify(trip)})'><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h9l5 5v15l-2-1-2 1-2-1-2 1-2-1-2 1V2z"></path><path d="M14 2v6h6"></path><path d="M8 13h8"></path><path d="M8 17h8"></path></svg></button></div></div><div class="trip-route"><div class="route-stop"><span class="route-marker pickup">P</span><div><div class="route-caption">Pick-up</div><div class="route-value">${trip.pickup||'Pickup location pending'}</div></div></div><div class="route-stop"><span class="route-marker dropoff">D</span><div><div class="route-caption">Drop-off</div><div class="route-value">${trip.dropoff||'Destination pending'}</div></div></div></div><div class="trip-meta-grid"><div class="trip-meta-item"><div class="trip-meta-label">Date</div><div class="trip-meta-value">${formatTripDate(trip.booking_date)}</div></div><div class="trip-meta-item"><div class="trip-meta-label">Booking ID</div><div class="trip-meta-value">#${trip.id||'—'}</div></div><div class="trip-meta-item"><div class="trip-meta-label">Price</div><div class="trip-meta-value">${formatPriceWithCurrency(trip.price,trip.currency)}</div></div></div></article>`}
+async function loadTrips(){futureTripListEl.innerHTML='<div class="trip-empty">Loading future trips...</div>';pastTripListEl.innerHTML='<div class="trip-empty">Loading past trips...</div>';const{data:futureTrips,error:futureError}=await supabaseClient.from('myaccount_future_trips').select('*').eq('email',currentUser.email).order('booking_date',{ascending:false});const{data:pastTrips,error:pastError}=await supabaseClient.from('myaccount_past_trips').select('*').eq('email',currentUser.email).order('booking_date',{ascending:false});if(futureError||!futureTrips||!futureTrips.length){futureTripListEl.innerHTML='<div class="trip-empty">No future trips yet.</div>'}else{futureTripListEl.innerHTML=futureTrips.map(trip=>renderTripCard(trip,'future')).join('')}if(pastError||!pastTrips||!pastTrips.length){pastTripListEl.innerHTML='<div class="trip-empty">No past trips yet.</div>'}else{pastTripListEl.innerHTML=pastTrips.map(trip=>renderTripCard(trip,'past')).join('')}}
+
+// Support functions
+function escapeHtml(str){return String(str==null?'':str).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function formatListTime(value){const d=new Date(value);if(Number.isNaN(d.getTime()))return'';const now=new Date();const sameDay=d.toDateString()===now.toDateString();return sameDay?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString([],{day:'2-digit',month:'short'});}
+function formatMsgTime(value){const d=new Date(value);if(Number.isNaN(d.getTime()))return'';return d.toLocaleString([],{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});}
+function statusLabel(status){return status==='resolved'?'Resolved':'Open';}
+function renderChatList(){if(!chats.length){chatListScroll.innerHTML='<div class="chat-list-empty">You have no conversations yet.<br>Start a new one whenever you need help.</div>';return;}chatListScroll.innerHTML=chats.map(chat=>{const active=chat.id===activeChatId?'active':'';const snippet=chat.last_message?escapeHtml(chat.last_message):'No messages yet';return`<div class="chat-item ${active}" data-id="${chat.id}"><div class="chat-item-top"><div class="chat-item-subject">${escapeHtml(chat.subject)}</div></div><div class="chat-item-snippet">${snippet}</div><div class="chat-item-bottom"><span class="chat-item-time">${formatListTime(chat.updated_at)}</span><span class="status-badge ${chat.status}">${statusLabel(chat.status)}</span></div></div>`;}).join('');chatListScroll.querySelectorAll('.chat-item').forEach(el=>{el.addEventListener('click',()=>selectChat(el.getAttribute('data-id')));});}
+async function loadSupportChats(){if(!currentUser){console.warn('loadSupportChats called but currentUser is null');return;}const{data,error}=await supabaseClient.from('support_chats').select('*').eq('email',currentUser.email).order('updated_at',{ascending:false});console.log('loadSupportChats result:',{data,error,email:currentUser.email});if(error){chatListScroll.innerHTML='<div class="chat-list-empty">Could not load conversations.</div>';return;}chats=(data||[]).map(c=>({...c,last_message:c.last_message||''}));await Promise.all(chats.map(async c=>{const{data:lastMsg}=await supabaseClient.from('support_messages').select('message').eq('chat_id',c.id).order('created_at',{ascending:false}).limit(1).maybeSingle();if(lastMsg)c.last_message=lastMsg.message;}));chats.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));renderChatList();}
+function upsertLocalChat(row){const idx=chats.findIndex(c=>c.id===row.id);if(idx>=0){chats[idx]={...chats[idx],...row};}else{chats.unshift({...row,last_message:''});}chats.sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));renderChatList();if(row.id===activeChatId)renderActiveChatHeader();}
+function renderActiveChatHeader(){const chat=chats.find(c=>c.id===activeChatId);if(!chat)return;activeChatSubject.textContent=chat.subject;activeChatMeta.textContent=`Opened ${formatListTime(chat.created_at)}`;activeChatStatus.textContent=statusLabel(chat.status);activeChatStatus.className='status-badge '+chat.status;resolvedNote.classList.toggle('hidden',chat.status!=='resolved');}
+function appendMessageBubble(msg){if(renderedMessageIds.has(msg.id))return;renderedMessageIds.add(msg.id);const bubble=document.createElement('div');bubble.className='chat-msg '+(msg.sender_type==='admin'?'admin':'customer');bubble.innerHTML=`${escapeHtml(msg.message)}<div class="chat-msg-meta">${msg.sender_type==='admin'?'Support team':'You'} · ${formatMsgTime(msg.created_at)}</div>`;messagesScroll.appendChild(bubble);messagesScroll.scrollTop=messagesScroll.scrollHeight;}
+async function selectChat(chatId){activeChatId=chatId;renderedMessageIds=new Set();messagesScroll.innerHTML='';chatEmptyState.classList.add('hidden');chatActiveView.classList.remove('hidden');chatActiveView.style.display='flex';renderChatList();renderActiveChatHeader();const{data,error}=await supabaseClient.from('support_messages').select('*').eq('chat_id',chatId).order('created_at',{ascending:true});if(!error&&data){data.forEach(appendMessageBubble);}subscribeToMessages(chatId);}
+function subscribeToMessages(chatId){if(messagesChannel){supabaseClient.removeChannel(messagesChannel);messagesChannel=null;}messagesChannel=supabaseClient.channel('support_messages_'+chatId).on('postgres_changes',{event:'INSERT',schema:'public',table:'support_messages',filter:`chat_id=eq.${chatId}`},payload=>{appendMessageBubble(payload.new);}).subscribe();}
+function subscribeToChats(){if(chatsChannel){supabaseClient.removeChannel(chatsChannel);chatsChannel=null;}chatsChannel=supabaseClient.channel('support_chats_'+(currentUser?.id||'anon')).on('postgres_changes',{event:'*',schema:'public',table:'support_chats',filter:`email=eq.${currentUser?.email||''}`},payload=>{if(payload.eventType==='DELETE'){chats=chats.filter(c=>c.id!==payload.old.id);renderChatList();return;}upsertLocalChat(payload.new);}).subscribe();}
+async function sendMessage(){const text=messageInput.value.trim();if(!text||!activeChatId)return;sendMessageBtn.disabled=true;const{data,error}=await supabaseClient.from('support_messages').insert({chat_id:activeChatId,sender_type:'customer',sender_name:currentFullName||currentUser.email,message:text}).select().single();sendMessageBtn.disabled=false;if(error){alert('Could not send your message. Please try again.');return;}messageInput.value='';messageInput.style.height='auto';appendMessageBubble(data);}
+messageInput.addEventListener('input',()=>{messageInput.style.height='auto';messageInput.style.height=Math.min(messageInput.scrollHeight,120)+'px';});
+messageInput.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}});
+sendMessageBtn.addEventListener('click',sendMessage);
+function openNewChatModal(){if(!currentUser){alert('You must be logged in to create a conversation.');return;}newChatSubject.value='';newChatMessage.value='';newChatSubjectError.style.display='none';newChatMessageError.style.display='none';newChatError.style.display='none';document.body.style.overflow='hidden';newChatOverlay.classList.add('show');newChatOverlay.setAttribute('aria-hidden','false');setTimeout(()=>newChatSubject.focus(),50);}
+function closeNewChatModal(){document.body.style.overflow='';newChatOverlay.classList.remove('show');newChatOverlay.setAttribute('aria-hidden','true');}
+newChatBtn.addEventListener('click',openNewChatModal);
+emptyStateNewChatBtn.addEventListener('click',openNewChatModal);
+newChatCloseBtn.addEventListener('click',closeNewChatModal);
+newChatCancelBtn.addEventListener('click',closeNewChatModal);
+newChatOverlay.addEventListener('click',e=>{if(e.target===newChatOverlay)closeNewChatModal();});
+async function submitNewChat(){if(!currentUser){console.error('submitNewChat called with currentUser null');return;}const subject=newChatSubject.value.trim();const message=newChatMessage.value.trim();let hasError=false;newChatSubjectError.style.display=subject?'none':'block';newChatMessageError.style.display=message?'none':'block';if(!subject||!message)hasError=true;newChatError.style.display='none';if(hasError)return;newChatSubmitBtn.disabled=true;const{data:chat,error:chatError}=await supabaseClient.from('support_chats').insert({email:currentUser.email,full_name:currentFullName||null,subject,status:'open'}).select().single();if(chatError){newChatError.textContent=chatError.message||'Could not start the conversation.';newChatError.style.display='block';newChatSubmitBtn.disabled=false;return;}const{error:msgError}=await supabaseClient.from('support_messages').insert({chat_id:chat.id,sender_type:'customer',sender_name:currentFullName||currentUser.email,message});newChatSubmitBtn.disabled=false;if(msgError){newChatError.textContent=msgError.message||'Could not send the first message.';newChatError.style.display='block';return;}closeNewChatModal();upsertLocalChat(chat);selectChat(chat.id);}
+newChatSubmitBtn.addEventListener('click',submitNewChat);
+
+async function loadAccount(){
+const{data:userData,error:userError}=await supabaseClient.auth.getUser();
+if(userError||!userData?.user)return false;
+const expiresAt=Number(localStorage.getItem(SESSION_KEY));
+if(expiresAt&&Date.now()>=expiresAt){
+localStorage.removeItem(SESSION_KEY);
+await supabaseClient.auth.signOut();
+window.top.location.href='https://www.airportlink.app/login';
+return false
+}
+currentUser=userData.user;
+emailEl.value=currentUser.email||'';
+const{data:contact,error:contactError}=await supabaseClient
+.from('contacts')
+.select('id, email, full_name, is_admin')
+.eq('email',currentUser.email)
+.maybeSingle();
+if(contactError)console.error('contacts select error:',contactError);
+if(contact){
+fullNameEl.value=contact.full_name||currentUser.user_metadata?.full_name||''
+}else{
+fullNameEl.value=currentUser.user_metadata?.full_name||''
+}
+await loadTrips().catch(()=>{});
+return true
+}
+
+saveProfileBtn.addEventListener('click',async()=>{clearProfileMsgs();if(!currentUser)return showProfileError('Please sign in again.');const fullName=fullNameEl.value.trim();if(!nonEmpty(fullName)){fullNameError.style.display='block';return showProfileError('Please fix the highlighted field.')}if(fullName.length<2){fullNameError.textContent='Full name must be at least 2 characters.';fullNameError.style.display='block';return showProfileError('Please fix the highlighted field.')}const{error}=await supabaseClient.from('contacts').upsert({email:currentUser.email,full_name:fullName},{onConflict:'email'});if(error)return showProfileError(error.message||'Could not save profile.');showProfileSuccess('Profile updated successfully.')});
+saveBillingBtn.addEventListener('click',async()=>{clearBillingMsgs();if(!currentUser)return showBillingError('Please sign in again.');const billingName=billingNameEl.value.trim();const billingStreet=billingStreetEl.value.trim();const billingCity=billingCityEl.value.trim();const billingPostal=billingPostalEl.value.trim();const billingCountry=billingCountryEl.value.trim();const phoneNumber=phoneNumberEl.value.trim();let hasError=false;if(!nonEmpty(billingName)){setFieldError(billingNameError,true);hasError=true}if(!nonEmpty(billingStreet)){setFieldError(billingStreetError,true);hasError=true}if(!nonEmpty(billingCity)){setFieldError(billingCityError,true);hasError=true}if(!validPostal(billingPostal)){setFieldError(billingPostalError,true);hasError=true}if(!nonEmpty(billingCountry)){setFieldError(billingCountryError,true);hasError=true}if(!validPhone(phoneNumber)){setFieldError(phoneNumberError,true);hasError=true}if(hasError)return showBillingError('Please fix the highlighted fields.');const{error}=await supabaseClient.from('contacts').upsert({email:currentUser.email,full_name:fullNameEl.value.trim(),billing_name:billingName,billing_street:billingStreet,billing_city:billingCity,billing_postal:billingPostal,billing_country:billingCountry,phone_number:phoneNumber},{onConflict:'email'});if(error)return showBillingError(error.message||'Could not save billing details.');showBillingSuccess('Billing details updated successfully.')});
+[fullNameEl,billingNameEl,billingStreetEl,billingCityEl,billingPostalEl,billingCountryEl,phoneNumberEl].forEach(el=>el.addEventListener('input',()=>{if(el===fullNameEl)fullNameError.style.display='none';if(el===billingNameEl)billingNameError.style.display='none';if(el===billingStreetEl)billingStreetError.style.display='none';if(el===billingCityEl)billingCityError.style.display='none';if(el===billingPostalEl)billingPostalError.style.display='none';if(el===billingCountryEl)billingCountryError.style.display='none';if(el===phoneNumberEl)phoneNumberError.style.display='none'}));
+receiptCloseBtn.addEventListener('click',closeReceipt);
+receiptOverlay.addEventListener('click',e=>{if(e.target===receiptOverlay)closeReceipt()});
+receiptDownloadBtn.addEventListener('click',downloadReceipt);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReceipt()});
+newBookingBtn.addEventListener('click',()=>{window.top.location.href='https://www.airportlink.app'});
+logoutBtn.addEventListener('click',async()=>{localStorage.removeItem(SESSION_KEY);localStorage.removeItem(EMAIL_KEY);await supabaseClient.auth.signOut();window.top.location.href='https://www.airportlink.app/login'});
+window.onmessage=(event)=>{const data=event.data;if(!data)return;if(typeof data==='string'){document.documentElement.setAttribute('data-theme',data==='dark'?'dark':'light');return}if(data.type==='theme'){document.documentElement.setAttribute('data-theme',data.value==='dark'?'dark':'light')}};
+window.parent.postMessage('ready','*');
+(async()=>{const ok=await loadAccount();if(!ok){window.top.location.href='https://www.airportlink.app/login';return}accountApp.classList.remove('hidden')})();
 </script>
 </body>
 </html>
