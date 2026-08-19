@@ -64,9 +64,6 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute) {
   return priceEUR;
 }
 
-// Calls Google Directions API server-side — the same route calculation
-// the frontend map does, but computed independently so the client can't
-// spoof the distance either.
 async function getDistanceAndDuration(pickupAddress, dropoffAddress) {
   const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
   url.searchParams.set('origin', pickupAddress);
@@ -107,6 +104,74 @@ app.get('/', (req, res) => {
   res.send('Backend is running');
 });
 
+// ============================================================
+// REGISTER — cria user no Supabase Auth + registo em contacts
+// ============================================================
+app.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, email and password are required.'
+      });
+    }
+
+    // 1. Criar user no Supabase Auth (com service role)
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true, // confirma logo o email (podes mudar se quiseres confirmação)
+      user_metadata: {
+        full_name: name
+      }
+    });
+
+    if (authError) {
+      console.error('Auth error:', authError);
+      return res.status(400).json({
+        success: false,
+        message: authError.message || 'Could not create account.'
+      });
+    }
+
+    if (!authData?.user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Could not create account.'
+      });
+    }
+
+    // 2. Inserir registo em contacts
+    const { error: contactError } = await supabase
+      .from('contacts')
+      .insert({
+        id: authData.user.id,
+        full_name: name,
+        email: email,
+        is_admin: false
+      });
+
+    if (contactError) {
+      console.error('Contacts insert error:', contactError);
+      // Opcional: podes tentar apagar o user criado em caso de erro
+      return res.status(500).json({
+        success: false,
+        message: 'Account created but profile setup failed. Please contact support.'
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({
+      success: false,
+      message: err.message || 'Could not create account.'
+    });
+  }
+});
+
 app.post('/api/create-checkout-session', async (req, res) => {
   const { booking } = req.body;
 
@@ -129,9 +194,6 @@ app.post('/api/create-checkout-session', async (req, res) => {
     return res.status(400).json({ error: 'Could not calculate the route for this pickup/dropoff.' });
   }
 
-  // These two lines are the actual source of truth for what gets charged.
-  // `req.body.amount` and `booking.price` (sent by the browser) are only
-  // ever used for display purposes and are ignored here.
   const priceEUR = computePriceEUR(distanceKm, passengers, isPortugalRoute);
   const priceInCurrency = priceEUR * EXCHANGE_RATES[currency];
   const amount = toStripeAmount(priceInCurrency, currency);
