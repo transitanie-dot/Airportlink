@@ -4,6 +4,7 @@ import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import loginRouter from './routes/login.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,7 +37,7 @@ const EXCHANGE_RATES = {
 };
 
 // Stripe treats these currencies as having no minor unit (no cents).
-// Keep in sync with https://docs.stripe.com/currencies#zero-decimal
+// Keep in sync with [https://docs.stripe.com/currencies#zero-decimal](https://docs.stripe.com/currencies#zero-decimal)
 const ZERO_DECIMAL_CURRENCIES = ['JPY'];
 
 function passengerMultiplier(count) {
@@ -102,6 +103,46 @@ app.use(express.json());
 
 app.get('/', (req, res) => {
   res.send('Backend is running');
+});
+
+// ============================================================
+// LOGIN — autentica user no Supabase Auth
+// ============================================================
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: "Email and password required"
+      });
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (error || !data?.session) {
+      return res.status(401).json({
+        success: false,
+        error: error?.message || "Invalid credentials"
+      });
+    }
+
+    res.json({
+      success: true,
+      email: data.user?.email || email
+    });
+
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({
+      success: false,
+      error: "An error occurred"
+    });
+  }
 });
 
 // ============================================================
