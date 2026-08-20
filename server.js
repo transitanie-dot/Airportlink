@@ -4,7 +4,6 @@ import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import loginRouter from './routes/login.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
