@@ -2,10 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,10 +19,9 @@ const supabase = createClient(
 );
 
 // ============================================================
-// Pricing — mirrors the frontend calculator exactly, so quotes
-// shown to the customer match what actually gets charged. This
-// is the SOURCE OF TRUTH: the amount sent by the browser is
-// never trusted, only used as a display hint before this runs.
+// Pricing — espelha o calculador do frontend. Esta é a FONTE DE
+// VERDADE: o valor enviado pelo browser nunca é usado para cobrar,
+// apenas para mostrar uma estimativa antes disto correr.
 // ============================================================
 
 const EXCHANGE_RATES = {
@@ -35,9 +30,27 @@ const EXCHANGE_RATES = {
   MXN: 18.5, ZAR: 20.0, AED: 3.95, SAR: 4.05
 };
 
-// Stripe treats these currencies as having no minor unit (no cents).
-// Keep in sync with https://docs.stripe.com/currencies#zero-decimal
+// Moedas sem subunidade. https://docs.stripe.com/currencies#zero-decimal
 const ZERO_DECIMAL_CURRENCIES = ['JPY'];
+
+// Domínios autorizados a chamar esta API. 'origin: *' deixava
+// qualquer site do mundo criar sessões de pagamento em teu nome.
+const ALLOWED_ORIGINS = [
+  'https://www.airportlink.app',
+  'https://airportlink.app',
+  'https://www.theepictours.com',
+  // Os embeds HTML do Wix correm em filesusr.com.
+  /\.filesusr\.com$/,
+  /\.wixsite\.com$/,
+  /\.editorx\.io$/
+];
+
+function originAllowed(origin) {
+  if (!origin) return true; // pedidos server-to-server e curl
+  return ALLOWED_ORIGINS.some(function (rule) {
+    return rule instanceof RegExp ? rule.test(new URL(origin).hostname) : rule === origin;
+  });
+}
 
 function passengerMultiplier(count) {
   const n = Math.max(1, Math.min(16, parseInt(count || '1', 10) || 1));
@@ -89,27 +102,36 @@ async function getDistanceAndDuration(pickupAddress, dropoffAddress) {
 }
 
 app.use(cors({
-  origin: '*',
+  origin: function (origin, callback) {
+    if (originAllowed(origin)) return callback(null, true);
+    console.warn('CORS bloqueado:', origin);
+    return callback(new Error('Origin not allowed'));
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Stripe-Signature']
 }));
 
-// Serve arquivos estáticos da pasta public/ (DEVE VIR PRIMEIRO!)
 app.use(express.static('public'));
 
+// O webhook precisa do corpo cru para validar a assinatura,
+// por isso este middleware tem de vir antes do express.json().
 app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('Backend is running');
-});
+app.get('/', (req, res) => res.send('Backend is running'));
+
+app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // ============================================================
 // REGISTER — cria user no Supabase Auth + registo em contacts
+//
+// NOTA: /api/login foi removido. O login passou a ser feito
+// diretamente contra o Supabase a partir do browser, que devolve um
+// JWT — este endpoint não devolvia token nenhum e ficou órfão.
 // ============================================================
 app.post('/register', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, phone } = req.body;
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -118,44 +140,42 @@ app.post('/register', async (req, res) => {
       });
     }
 
-    // 1. Criar user no Supabase Auth (com service role)
+    if (String(password).length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 8 characters.'
+      });
+    }
+
     const { data: authData, error: authError } = await supabase.auth.admin.createUser({
       email,
       password,
-      email_confirm: true, // confirma logo o email (podes mudar se quiseres confirmação)
-      user_metadata: {
-        full_name: name
-      }
+      email_confirm: true,
+      user_metadata: { full_name: name }
     });
 
-    if (authError) {
+    if (authError || !authData?.user) {
       console.error('Auth error:', authError);
       return res.status(400).json({
         success: false,
-        message: authError.message || 'Could not create account.'
+        message: authError?.message || 'Could not create account.'
       });
     }
 
-    if (!authData?.user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Could not create account.'
-      });
-    }
-
-    // 2. Inserir registo em contacts
+    // upsert por email: a contacts não tem primary key em id e pode
+    // já existir uma linha de quem reservou sem criar conta.
     const { error: contactError } = await supabase
       .from('contacts')
-      .insert({
+      .upsert({
         id: authData.user.id,
         full_name: name,
         email: email,
+        phone_number: phone || null,
         is_admin: false
-      });
+      }, { onConflict: 'email' });
 
     if (contactError) {
-      console.error('Contacts insert error:', contactError);
-      // Opcional: podes tentar apagar o user criado em caso de erro
+      console.error('Contacts upsert error:', contactError);
       return res.status(500).json({
         success: false,
         message: 'Account created but profile setup failed. Please contact support.'
@@ -172,6 +192,9 @@ app.post('/register', async (req, res) => {
   }
 });
 
+// ============================================================
+// CHECKOUT
+// ============================================================
 app.post('/api/create-checkout-session', async (req, res) => {
   const { booking } = req.body;
 
@@ -188,7 +211,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   let distanceKm, durationMinutes, isPortugalRoute;
   try {
-    ({ distanceKm, durationMinutes, isPortugalRoute } = await getDistanceAndDuration(booking.pickup, booking.dropoff));
+    ({ distanceKm, durationMinutes, isPortugalRoute } =
+      await getDistanceAndDuration(booking.pickup, booking.dropoff));
   } catch (error) {
     console.error('Directions error:', error);
     return res.status(400).json({ error: 'Could not calculate the route for this pickup/dropoff.' });
@@ -200,66 +224,65 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   const phoneCode = booking.phone_code || booking.phoneCode || '';
   const phoneNumber = booking.phone_number || booking.phoneNumber || '';
-  const fullPhone = phoneCode || phoneNumber ? `+${phoneCode}${phoneNumber ? ` ${phoneNumber}` : ''}`.trim() : '';
+  const fullPhone = phoneCode || phoneNumber
+    ? `+${phoneCode}${phoneNumber ? ` ${phoneNumber}` : ''}`.trim()
+    : '';
+
+  const metadata = {
+    email: booking.email || '',
+    user_id: booking.user_id || '',
+    full_name: booking.full_name || booking.fullName || '',
+    phone_code: phoneCode,
+    phone_number: phoneNumber,
+    phone: fullPhone,
+    currency: currency || '',
+    notes: booking.notes || '',
+    flight_number: booking.flight_number || booking.flightNumber || '',
+    pickup: booking.pickup || '',
+    dropoff: booking.dropoff || '',
+    booking_date: booking.booking_date || booking.date || '',
+    booking_time: booking.booking_time || booking.time || '',
+    passengers: String(passengers),
+    price: String(priceInCurrency.toFixed(2)),
+    distance_km: String(distanceKm.toFixed(1)),
+    duration_minutes: String(durationMinutes),
+    status: 'paid'
+  };
 
   try {
+    const descriptionParts = [
+      `${passengers} passengers`,
+      `${distanceKm.toFixed(1)} km`,
+      `${durationMinutes} min`
+    ];
+    if (metadata.flight_number) descriptionParts.push(`Flight ${metadata.flight_number}`);
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
-      line_items: [
-        {
-          price_data: {
-            currency: currency.toLowerCase(),
-            product_data: {
-              name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
-              description: `${passengers} passengers, ${distanceKm.toFixed(1)} km, ${durationMinutes} min`
-            },
-            unit_amount: amount
+      line_items: [{
+        price_data: {
+          currency: currency.toLowerCase(),
+          product_data: {
+            name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
+            description: descriptionParts.join(', ')
           },
-          quantity: 1
-        }
-      ],
+          unit_amount: amount
+        },
+        quantity: 1
+      }],
       success_url: 'https://www.airportlink.app/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: 'https://www.theepictours.com/calculator?cancel=true',
+      cancel_url: 'https://www.airportlink.app/?cancel=true',
       customer_email: booking.email,
-      metadata: {
-        email: booking.email || '',
-        user_id: booking.user_id || '',
-        full_name: booking.full_name || booking.fullName || '',
-        phone_code: phoneCode,
-        phone_number: phoneNumber,
-        phone: fullPhone,
-        currency: currency || '',
-        notes: booking.notes || '',
-        pickup: booking.pickup || '',
-        dropoff: booking.dropoff || '',
-        booking_date: booking.booking_date || booking.date || '',
-        booking_time: booking.booking_time || booking.time || '',
-        passengers: String(passengers),
-        price: String(priceInCurrency.toFixed(2)),
-        distance_km: String(distanceKm.toFixed(1)),
-        duration_minutes: String(durationMinutes),
-        status: 'paid'
-      },
-      payment_intent_data: {
-        metadata: {
-          email: booking.email || '',
-          user_id: booking.user_id || '',
-          full_name: booking.full_name || booking.fullName || '',
-          phone_code: phoneCode,
-          phone_number: phoneNumber,
-          phone: fullPhone,
-          currency: currency || '',
-          notes: booking.notes || '',
-          pickup: booking.pickup || '',
-          dropoff: booking.dropoff || '',
-          booking_date: booking.booking_date || booking.date || '',
-          booking_time: booking.booking_time || booking.time || ''
-        }
-      }
+      metadata,
+      payment_intent_data: { metadata }
     });
 
-    res.json({ sessionId: session.id });
+    // Devolvemos o URL, não o sessionId. O calculador corre num iframe
+    // e o Stripe recusa ser carregado dentro de frames — o redirect
+    // tem de ser feito com window.top.location.href a partir do
+    // cliente. O redirectToCheckout do Stripe.js está depreciado.
+    res.json({ url: session.url, sessionId: session.id });
   } catch (error) {
     console.error('Stripe error:', error);
     res.status(500).json({ error: error.message });
@@ -268,33 +291,31 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
 app.post('/api/confirm-payment', async (req, res) => {
   const { session_id } = req.body;
-
-  if (!session_id) {
-    return res.status(400).json({ error: 'Missing session_id' });
-  }
+  if (!session_id) return res.status(400).json({ error: 'Missing session_id' });
 
   try {
     const session = await stripe.checkout.sessions.retrieve(session_id);
 
+    // charges deixou de vir expandido por omissão nas versões
+    // recentes da API. latest_charge é o caminho atual.
     const paymentIntent =
       typeof session.payment_intent === 'string'
-        ? await stripe.paymentIntents.retrieve(session.payment_intent)
+        ? await stripe.paymentIntents.retrieve(session.payment_intent, { expand: ['latest_charge'] })
         : null;
 
-    const firstCharge =
-      paymentIntent?.charges?.data?.[0] || null;
+    const charge = paymentIntent?.latest_charge || null;
 
     return res.json({
       id: session.id,
       status: session.status,
       payment_status: session.payment_status,
-      customer_email: session.customer_email || null,
+      customer_email: session.customer_email || session.customer_details?.email || null,
       customer: typeof session.customer === 'string' ? session.customer : null,
       amount_total: session.amount_total || null,
       currency: session.currency || null,
       payment_intent_id: typeof session.payment_intent === 'string' ? session.payment_intent : null,
-      receipt_url: firstCharge?.receipt_url || null,
-      payment_method_type: firstCharge?.payment_method_details?.type || null
+      receipt_url: charge?.receipt_url || null,
+      payment_method_type: charge?.payment_method_details?.type || null
     });
   } catch (error) {
     console.error('Confirm payment error:', error);
@@ -302,19 +323,20 @@ app.post('/api/confirm-payment', async (req, res) => {
   }
 });
 
+// ============================================================
+// WEBHOOK — a única coisa que escreve em bookings.
+// Usa a service_role key, que ignora a RLS. É por isso que o
+// browser não tem política de INSERT nessa tabela: sem isto,
+// qualquer pessoa forjava uma reserva paga.
+// ============================================================
 app.post('/api/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
-
-  if (!sig) {
-    return res.status(400).send('Missing Stripe signature');
-  }
+  if (!sig) return res.status(400).send('Missing Stripe signature');
 
   let event;
   try {
     event = await stripe.webhooks.constructEventAsync(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
+      req.body, sig, process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -324,26 +346,36 @@ app.post('/api/stripe-webhook', async (req, res) => {
     const session = event.data.object;
     const md = session.metadata || {};
 
-    let paymentIntent = null;
-    let firstCharge = null;
-
+    let charge = null;
     if (typeof session.payment_intent === 'string') {
       try {
-        paymentIntent = await stripe.paymentIntents.retrieve(session.payment_intent);
-        firstCharge = paymentIntent.charges?.data?.[0] || null;
+        const pi = await stripe.paymentIntents.retrieve(
+          session.payment_intent, { expand: ['latest_charge'] }
+        );
+        charge = pi.latest_charge || null;
       } catch (e) {
         console.error('PaymentIntent retrieve error:', e);
       }
     }
 
+    // Se o cliente não estava autenticado, tenta ligar a reserva à
+    // conta pelo email para que apareça no /myaccount dele.
+    let userId = md.user_id || null;
+    if (!userId && md.email) {
+      const { data: contact } = await supabase
+        .from('contacts').select('id').ilike('email', md.email).maybeSingle();
+      if (contact?.id) userId = contact.id;
+    }
+
     const bookingRow = {
-      user_id: md.user_id || null,
+      user_id: userId,
       full_name: md.full_name || null,
       phone_code: md.phone_code || null,
       phone_number: md.phone_number || null,
       phone: md.phone || null,
       currency: md.currency || session.currency || null,
       notes: md.notes || null,
+      flight_number: md.flight_number || null,
       pickup: md.pickup || null,
       dropoff: md.dropoff || null,
       booking_date: md.booking_date || null,
@@ -358,8 +390,8 @@ app.post('/api/stripe-webhook', async (req, res) => {
       stripe_customer_id: typeof session.customer === 'string' ? session.customer : null,
       stripe_checkout_session_id: session.id,
       stripe_payment_intent_id: session.payment_intent || null,
-      receipt_url: firstCharge?.receipt_url || null,
-      payment_method_type: firstCharge?.payment_method_details?.type || null,
+      receipt_url: charge?.receipt_url || null,
+      payment_method_type: charge?.payment_method_details?.type || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       email: md.email || session.customer_details?.email || session.customer_email || null
@@ -378,6 +410,4 @@ app.post('/api/stripe-webhook', async (req, res) => {
   res.json({ received: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
