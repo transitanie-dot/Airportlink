@@ -2,6 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,39 +22,98 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
+const APP_ORIGIN = process.env.APP_ORIGIN || 'https://app.airportlink.app';
+
+// Horas antes da recolha até às quais o cliente pode cancelar sozinho.
+const FREE_CANCELLATION_HOURS = Number(process.env.FREE_CANCELLATION_HOURS || 24);
+
 // ============================================================
-// Pricing — espelha o calculador do frontend. Esta é a FONTE DE
-// VERDADE: o valor enviado pelo browser nunca é usado para cobrar,
-// apenas para mostrar uma estimativa antes disto correr.
+// CÂMBIOS
+//
+// As taxas eram constantes no código e estavam desatualizadas em até
+// 11% — o que significava cobrar abaixo do pretendido em USD, JPY,
+// CAD, NZD, AED e SAR. Passam a vir do Banco Central Europeu uma vez
+// por dia, com as constantes abaixo apenas como rede de segurança.
 // ============================================================
 
-const EXCHANGE_RATES = {
-  EUR: 1.0, USD: 1.08, GBP: 0.85, BRL: 6.2, CAD: 1.48, AUD: 1.65,
-  CHF: 0.97, JPY: 165, NOK: 11.5, SEK: 11.3, DKK: 7.45, NZD: 1.78,
-  MXN: 18.5, ZAR: 20.0, AED: 3.95, SAR: 4.05
+// Valores de referência de agosto de 2026. Só usados se o BCE
+// estiver inacessível.
+const FALLBACK_RATES = {
+  EUR: 1.0, USD: 1.168, GBP: 0.856, BRL: 6.02, CAD: 1.608, AUD: 1.639,
+  CHF: 0.936, JPY: 185.7, NOK: 10.95, SEK: 11.04, DKK: 7.46, NZD: 1.953,
+  MXN: 19.76, ZAR: 18.80, AED: 4.29, SAR: 4.38
 };
+
+const SUPPORTED_CURRENCIES = Object.keys(FALLBACK_RATES);
+
+// O BCE não publica AED nem SAR: ambas têm paridade fixa ao dólar.
+const USD_PEGS = { AED: 3.6725, SAR: 3.75 };
+
+// Margem sobre a taxa de mercado. Entre a cotação de hoje e o dia em
+// que o Stripe converte há sempre movimento, e o Stripe cobra a sua
+// própria conversão. 2% é conservador.
+const FX_MARGIN = Number(process.env.FX_MARGIN || 0.02);
 
 // Moedas sem subunidade. https://docs.stripe.com/currencies#zero-decimal
 const ZERO_DECIMAL_CURRENCIES = ['JPY'];
 
-// Domínios autorizados a chamar esta API. 'origin: *' deixava
-// qualquer site do mundo criar sessões de pagamento em teu nome.
-const ALLOWED_ORIGINS = [
-  'https://www.airportlink.app',
-  'https://airportlink.app',
-  'https://www.theepictours.com',
-  // Os embeds HTML do Wix correm em filesusr.com.
-  /\.filesusr\.com$/,
-  /\.wixsite\.com$/,
-  /\.editorx\.io$/
-];
+let ratesCache = { rates: { ...FALLBACK_RATES }, fetchedAt: 0, source: 'fallback' };
+const RATES_TTL_MS = 6 * 60 * 60 * 1000;
 
-function originAllowed(origin) {
-  if (!origin) return true; // pedidos server-to-server e curl
-  return ALLOWED_ORIGINS.some(function (rule) {
-    return rule instanceof RegExp ? rule.test(new URL(origin).hostname) : rule === origin;
-  });
+async function loadExchangeRates() {
+  if (Date.now() - ratesCache.fetchedAt < RATES_TTL_MS) return ratesCache;
+
+  try {
+    const response = await fetch(
+      'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml',
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!response.ok) throw new Error('ECB HTTP ' + response.status);
+
+    const xml = await response.text();
+    const parsed = { EUR: 1.0 };
+    const pattern = /currency=['"]([A-Z]{3})['"]\s+rate=['"]([\d.]+)['"]/g;
+    let match;
+    while ((match = pattern.exec(xml)) !== null) {
+      parsed[match[1]] = parseFloat(match[2]);
+    }
+
+    if (!parsed.USD) throw new Error('ECB response missing USD');
+
+    for (const [code, peg] of Object.entries(USD_PEGS)) {
+      parsed[code] = parsed.USD * peg;
+    }
+
+    const rates = {};
+    for (const code of SUPPORTED_CURRENCIES) {
+      rates[code] = parsed[code] || FALLBACK_RATES[code];
+    }
+
+    ratesCache = { rates, fetchedAt: Date.now(), source: 'ecb' };
+    console.log('Exchange rates updated from ECB');
+  } catch (error) {
+    console.error('ECB rates error, using previous values:', error.message);
+    ratesCache = {
+      rates: ratesCache.rates,
+      fetchedAt: Date.now() - RATES_TTL_MS + 15 * 60 * 1000, // tenta outra vez em 15 min
+      source: ratesCache.source === 'ecb' ? 'ecb-stale' : 'fallback'
+    };
+  }
+
+  return ratesCache;
 }
+
+function convertFromEUR(amountEUR, currency, rates) {
+  const rate = rates[currency];
+  if (!rate) return null;
+  return amountEUR * rate * (currency === 'EUR' ? 1 : 1 + FX_MARGIN);
+}
+
+// ============================================================
+// PREÇOS — fonte de verdade. O valor enviado pelo browser nunca é
+// usado para cobrar, só para mostrar uma estimativa antes disto.
+// ============================================================
 
 function passengerMultiplier(count) {
   const n = Math.max(1, Math.min(16, parseInt(count || '1', 10) || 1));
@@ -101,50 +164,99 @@ async function getDistanceAndDuration(pickupAddress, dropoffAddress) {
   };
 }
 
+// ============================================================
+// CORS — 'origin: *' deixava qualquer site do mundo criar sessões
+// de pagamento em teu nome.
+// ============================================================
+const ALLOWED_ORIGINS = [
+  SITE_ORIGIN,
+  APP_ORIGIN,
+  'https://airportlink.app',
+  'https://www.theepictours.com',
+  /\.filesusr\.com$/,   // embeds HTML do Wix
+  /\.wixsite\.com$/,
+  /\.editorx\.io$/
+];
+
+function originAllowed(origin) {
+  if (!origin) return true; // curl, server-to-server
+  let hostname;
+  try { hostname = new URL(origin).hostname; } catch (e) { return false; }
+  return ALLOWED_ORIGINS.some((rule) =>
+    rule instanceof RegExp ? rule.test(hostname) : rule === origin
+  );
+}
+
 app.use(cors({
-  origin: function (origin, callback) {
+  origin(origin, callback) {
     if (originAllowed(origin)) return callback(null, true);
-    console.warn('CORS bloqueado:', origin);
+    console.warn('CORS blocked:', origin);
     return callback(new Error('Origin not allowed'));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Stripe-Signature']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature']
 }));
 
-app.use(express.static('public'));
-
 // O webhook precisa do corpo cru para validar a assinatura,
-// por isso este middleware tem de vir antes do express.json().
+// por isso vem antes do express.json().
 app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('Backend is running'));
+// ============================================================
+// PÁGINAS DA APLICAÇÃO
+//
+// A área de cliente deixa de viver dentro de iframes do Wix. Uma só
+// origem elimina o silo de localStorage, a ponte de postMessage, o
+// flash do tema e o scroll preso no telemóvel.
+// ============================================================
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
-app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+const PAGES = ['myaccount', 'support', 'admin'];
+for (const page of PAGES) {
+  app.get('/' + page, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', page + '.html'));
+  });
+}
+
+app.get('/', (req, res) => res.redirect(SITE_ORIGIN));
+
+app.get('/health', async (req, res) => {
+  const { source, fetchedAt } = await loadExchangeRates();
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    ratesSource: source,
+    ratesAge: Math.round((Date.now() - fetchedAt) / 1000) + 's'
+  });
+});
 
 // ============================================================
-// REGISTER — cria user no Supabase Auth + registo em contacts
-//
-// NOTA: /api/login foi removido. O login passou a ser feito
-// diretamente contra o Supabase a partir do browser, que devolve um
-// JWT — este endpoint não devolvia token nenhum e ficou órfão.
+// CÂMBIOS PARA O FRONTEND
+// O calculador usa isto para mostrar o preço, para que o valor
+// apresentado e o cobrado venham sempre da mesma fonte.
+// ============================================================
+app.get('/api/exchange-rates', async (req, res) => {
+  const { rates, source } = await loadExchangeRates();
+  const withMargin = {};
+  for (const [code, rate] of Object.entries(rates)) {
+    withMargin[code] = code === 'EUR' ? 1 : rate * (1 + FX_MARGIN);
+  }
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json({ base: 'EUR', source, rates: withMargin });
+});
+
+// ============================================================
+// REGISTO
 // ============================================================
 app.post('/register', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
 
     if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name, email and password are required.'
-      });
+      return res.status(400).json({ success: false, message: 'Name, email and password are required.' });
     }
-
     if (String(password).length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 8 characters.'
-      });
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
     }
 
     const { data: authData, error: authError } = await supabase.auth.admin.createUser({
@@ -162,17 +274,15 @@ app.post('/register', async (req, res) => {
       });
     }
 
-    // upsert por email: a contacts não tem primary key em id e pode
-    // já existir uma linha de quem reservou sem criar conta.
-    const { error: contactError } = await supabase
-      .from('contacts')
-      .upsert({
-        id: authData.user.id,
-        full_name: name,
-        email: email,
-        phone_number: phone || null,
-        is_admin: false
-      }, { onConflict: 'email' });
+    // upsert por email: contacts não tem primary key em id e pode já
+    // existir uma linha de quem reservou sem criar conta.
+    const { error: contactError } = await supabase.from('contacts').upsert({
+      id: authData.user.id,
+      full_name: name,
+      email,
+      phone_number: phone || null,
+      is_admin: false
+    }, { onConflict: 'email' });
 
     if (contactError) {
       console.error('Contacts upsert error:', contactError);
@@ -185,10 +295,7 @@ app.post('/register', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Register error:', err);
-    res.status(500).json({
-      success: false,
-      message: err.message || 'Could not create account.'
-    });
+    res.status(500).json({ success: false, message: err.message || 'Could not create account.' });
   }
 });
 
@@ -203,11 +310,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   const passengers = parseInt(booking.passengers, 10) || 1;
-  const currency = (booking.currency || req.body.currency || 'EUR').toUpperCase();
+  const currency = (booking.currency || 'EUR').toUpperCase();
 
-  if (!EXCHANGE_RATES[currency]) {
-    return res.status(400).json({ error: 'Unsupported currency' });
-  }
+  const { rates } = await loadExchangeRates();
+  if (!rates[currency]) return res.status(400).json({ error: 'Unsupported currency' });
 
   let distanceKm, durationMinutes, isPortugalRoute;
   try {
@@ -219,7 +325,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   const priceEUR = computePriceEUR(distanceKm, passengers, isPortugalRoute);
-  const priceInCurrency = priceEUR * EXCHANGE_RATES[currency];
+  const priceInCurrency = convertFromEUR(priceEUR, currency, rates);
   const amount = toStripeAmount(priceInCurrency, currency);
 
   const phoneCode = booking.phone_code || booking.phoneCode || '';
@@ -235,7 +341,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     phone_code: phoneCode,
     phone_number: phoneNumber,
     phone: fullPhone,
-    currency: currency || '',
+    currency,
     notes: booking.notes || '',
     flight_number: booking.flight_number || booking.flightNumber || '',
     pickup: booking.pickup || '',
@@ -250,12 +356,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
   };
 
   try {
-    const descriptionParts = [
-      `${passengers} passengers`,
-      `${distanceKm.toFixed(1)} km`,
-      `${durationMinutes} min`
-    ];
-    if (metadata.flight_number) descriptionParts.push(`Flight ${metadata.flight_number}`);
+    const parts = [`${passengers} passengers`, `${distanceKm.toFixed(1)} km`, `${durationMinutes} min`];
+    if (metadata.flight_number) parts.push(`Flight ${metadata.flight_number}`);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
@@ -265,23 +367,22 @@ app.post('/api/create-checkout-session', async (req, res) => {
           currency: currency.toLowerCase(),
           product_data: {
             name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
-            description: descriptionParts.join(', ')
+            description: parts.join(', ')
           },
           unit_amount: amount
         },
         quantity: 1
       }],
-      success_url: 'https://www.airportlink.app/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: 'https://www.airportlink.app/?cancel=true',
+      success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${SITE_ORIGIN}/?cancel=true`,
       customer_email: booking.email,
       metadata,
       payment_intent_data: { metadata }
     });
 
-    // Devolvemos o URL, não o sessionId. O calculador corre num iframe
-    // e o Stripe recusa ser carregado dentro de frames — o redirect
-    // tem de ser feito com window.top.location.href a partir do
-    // cliente. O redirectToCheckout do Stripe.js está depreciado.
+    // Devolvemos o URL, não o sessionId: o calculador corre num iframe
+    // do Wix e o Stripe recusa ser carregado dentro de frames. O
+    // redirect tem de ser window.top.location.href.
     res.json({ url: session.url, sessionId: session.id });
   } catch (error) {
     console.error('Stripe error:', error);
@@ -298,11 +399,9 @@ app.post('/api/confirm-payment', async (req, res) => {
 
     // charges deixou de vir expandido por omissão nas versões
     // recentes da API. latest_charge é o caminho atual.
-    const paymentIntent =
-      typeof session.payment_intent === 'string'
-        ? await stripe.paymentIntents.retrieve(session.payment_intent, { expand: ['latest_charge'] })
-        : null;
-
+    const paymentIntent = typeof session.payment_intent === 'string'
+      ? await stripe.paymentIntents.retrieve(session.payment_intent, { expand: ['latest_charge'] })
+      : null;
     const charge = paymentIntent?.latest_charge || null;
 
     return res.json({
@@ -310,7 +409,6 @@ app.post('/api/confirm-payment', async (req, res) => {
       status: session.status,
       payment_status: session.payment_status,
       customer_email: session.customer_email || session.customer_details?.email || null,
-      customer: typeof session.customer === 'string' ? session.customer : null,
       amount_total: session.amount_total || null,
       currency: session.currency || null,
       payment_intent_id: typeof session.payment_intent === 'string' ? session.payment_intent : null,
@@ -324,10 +422,91 @@ app.post('/api/confirm-payment', async (req, res) => {
 });
 
 // ============================================================
-// WEBHOOK — a única coisa que escreve em bookings.
-// Usa a service_role key, que ignora a RLS. É por isso que o
-// browser não tem política de INSERT nessa tabela: sem isto,
-// qualquer pessoa forjava uma reserva paga.
+// CANCELAMENTO COM REEMBOLSO
+//
+// Feito no servidor de propósito. O reembolso exige a chave secreta
+// do Stripe e a verificação da janela de 24 horas tem de ser
+// inviolável — nada disto pode viver no browser.
+// ============================================================
+app.post('/api/cancel-booking', async (req, res) => {
+  try {
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!token) return res.status(401).json({ error: 'Not signed in' });
+
+    const { data: userData, error: userError } = await supabase.auth.getUser(token);
+    if (userError || !userData?.user) return res.status(401).json({ error: 'Invalid session' });
+
+    const user = userData.user;
+    const { booking_id } = req.body;
+    if (!booking_id) return res.status(400).json({ error: 'Missing booking_id' });
+
+    const { data: booking, error: bookingError } = await supabase
+      .from('bookings').select('*').eq('id', booking_id).maybeSingle();
+
+    if (bookingError || !booking) return res.status(404).json({ error: 'Booking not found' });
+
+    // O pedido tem de ser do dono da reserva.
+    const owns = booking.user_id === user.id ||
+      String(booking.email || '').toLowerCase() === String(user.email || '').toLowerCase();
+    if (!owns) return res.status(403).json({ error: 'This booking is not yours' });
+
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'This booking is already cancelled' });
+    }
+
+    const pickupAt = new Date(`${booking.booking_date}T${booking.booking_time || '00:00'}`);
+    const hoursUntil = (pickupAt.getTime() - Date.now()) / 36e5;
+
+    if (!isFinite(hoursUntil)) {
+      return res.status(400).json({ error: 'This booking has no valid pick-up time. Please contact support.' });
+    }
+    if (hoursUntil < FREE_CANCELLATION_HOURS) {
+      return res.status(400).json({
+        error: `Free cancellation closes ${FREE_CANCELLATION_HOURS} hours before pick-up. Please contact support.`,
+        hoursUntilPickup: Math.max(0, Math.round(hoursUntil))
+      });
+    }
+
+    let refundId = null;
+    if (booking.stripe_payment_intent_id) {
+      try {
+        const refund = await stripe.refunds.create({
+          payment_intent: booking.stripe_payment_intent_id,
+          reason: 'requested_by_customer'
+        });
+        refundId = refund.id;
+      } catch (error) {
+        console.error('Refund error:', error);
+        return res.status(502).json({
+          error: 'We could not process the refund automatically. Please contact support.'
+        });
+      }
+    }
+
+    const { error: updateError } = await supabase.from('bookings').update({
+      status: 'cancelled',
+      payment_status: refundId ? 'refunded' : booking.payment_status,
+      updated_at: new Date().toISOString()
+    }).eq('id', booking_id);
+
+    if (updateError) {
+      console.error('Cancel update error:', updateError);
+      return res.status(500).json({
+        error: 'The refund was issued but the booking status could not be updated. Please contact support.'
+      });
+    }
+
+    res.json({ success: true, refunded: Boolean(refundId), refund_id: refundId });
+  } catch (error) {
+    console.error('Cancel booking error:', error);
+    res.status(500).json({ error: 'Something went wrong. Please contact support.' });
+  }
+});
+
+// ============================================================
+// WEBHOOK — a única coisa que escreve em bookings. Usa a
+// service_role key, que ignora a RLS. É por isso que o browser não
+// tem política de INSERT nessa tabela.
 // ============================================================
 app.post('/api/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -358,8 +537,8 @@ app.post('/api/stripe-webhook', async (req, res) => {
       }
     }
 
-    // Se o cliente não estava autenticado, tenta ligar a reserva à
-    // conta pelo email para que apareça no /myaccount dele.
+    // Liga a reserva à conta pelo email se o user_id não veio,
+    // para que apareça no /myaccount do cliente.
     let userId = md.user_id || null;
     if (!userId && md.email) {
       const { data: contact } = await supabase
@@ -410,4 +589,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
   res.json({ received: true });
 });
 
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`Server running on ${PORT}`);
+  await loadExchangeRates();
+});
