@@ -867,8 +867,6 @@ app.post('/api/agent/review', async (req, res) => {
       commission: data.agent_commission
     });
 
-    // Quando houver email de aprovação, é aqui que ele sai.
-
     return res.json({ success: true, agent: data });
   } catch (error) {
     console.error('agent/review error:', error);
@@ -1094,34 +1092,6 @@ app.post('/api/stripe-webhook', async (req, res) => {
         recipientEmail,
         error: emailError.message
       });
-    }
-
-    // Reserva feita por um agente: a confirmação acima foi para a
-    // agência, que é quem paga. Se o agente indicou o email do
-    // viajante, este recebe a sua própria cópia.
-    const passengerEmail = savedBooking.passenger_email;
-
-    if (
-      passengerEmail &&
-      passengerEmail.toLowerCase() !== String(recipientEmail || '').toLowerCase()
-    ) {
-      try {
-        await sendBookingConfirmation({
-          to: passengerEmail,
-          booking: savedBooking
-        });
-
-        console.log('Passenger copy sent:', {
-          bookingId: savedBooking.id,
-          passengerEmail
-        });
-      } catch (emailError) {
-        console.error('Passenger copy failed:', {
-          bookingId: savedBooking.id,
-          passengerEmail,
-          error: emailError.message
-        });
-      }
     }
   }
 
