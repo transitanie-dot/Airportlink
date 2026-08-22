@@ -224,17 +224,19 @@ async function getApprovedAgent(user) {
     return null;
   }
 
+  // travel_agents é a tabela das AGÊNCIAS. A contacts continua a ser
+  // a das pessoas — o agente tem linha nas duas.
   const { data, error } = await supabase
-    .from('contacts')
-    .select('id, email, full_name, agency_name, agent_status, agent_commission')
+    .from('travel_agents')
+    .select('id, email, contact_name, agency_name, status, commission')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (error || !data || data.agent_status !== 'approved') {
+  if (error || !data || data.status !== 'approved') {
     return null;
   }
 
-  const pct = Number(data.agent_commission);
+  const pct = Number(data.commission);
 
   return {
     ...data,
@@ -714,21 +716,23 @@ app.get('/api/agent/me', async (req, res) => {
     }
 
     const { data, error } = await supabase
-      .from('contacts')
+      .from('travel_agents')
       .select(
-        'id, email, full_name, agency_name, agency_vat, agency_country, ' +
-        'agency_website, agency_phone, agent_status, agent_commission'
+        'id, email, contact_name, agency_name, agency_vat, agency_country, ' +
+        'agency_website, agency_phone, note, status, commission, applied_at'
       )
       .eq('id', user.id)
       .maybeSingle();
 
     if (error) throw error;
 
+    // Sem linha na tabela significa que nunca se candidatou. Não
+    // existe estado 'none' guardado — a ausência é o estado.
     return res.json({
       email: user.email,
-      status: data?.agent_status || 'none',
-      commission: data?.agent_status === 'approved'
-        ? Number(data.agent_commission || DEFAULT_AGENT_COMMISSION)
+      status: data?.status || 'none',
+      commission: data?.status === 'approved'
+        ? Number(data.commission || DEFAULT_AGENT_COMMISSION)
         : null,
       agency_name: data?.agency_name || null,
       cancellation_hours: AGENT_CANCELLATION_HOURS,
@@ -771,40 +775,58 @@ app.post('/api/agent/apply', async (req, res) => {
     }
 
     const { data: existing } = await supabase
-      .from('contacts')
-      .select('agent_status')
+      .from('travel_agents')
+      .select('status')
       .eq('id', user.id)
       .maybeSingle();
 
-    if (existing?.agent_status === 'approved') {
+    if (existing?.status === 'approved') {
       return res.status(400).json({
         error: 'Your agency is already approved.'
       });
     }
 
-    if (existing?.agent_status === 'pending') {
+    if (existing?.status === 'pending') {
       return res.status(400).json({
         error: 'Your application is already under review.'
       });
     }
 
-    const { error } = await supabase
+    // O agente continua a ser uma pessoa: garantimos a linha em
+    // contacts, porque bookings.email aponta para lá.
+    const { error: contactError } = await supabase
       .from('contacts')
       .upsert({
         id: user.id,
         email: user.email,
         full_name: full_name || user.user_metadata?.full_name || null,
+        is_admin: false
+      }, {
+        onConflict: 'email'
+      });
+
+    if (contactError) throw contactError;
+
+    // O status e a commission ficam nos valores por omissão da
+    // tabela: 'pending' e 12. Nunca vêm do pedido.
+    const { error } = await supabase
+      .from('travel_agents')
+      .upsert({
+        id: user.id,
+        email: user.email,
+        contact_name: full_name || user.user_metadata?.full_name || null,
         agency_name,
         agency_vat: agency_vat || null,
         agency_country,
         agency_website: agency_website || null,
         agency_phone,
-        agent_note: note || null,
-        agent_status: 'pending',
-        agent_applied_at: new Date().toISOString(),
-        agent_commission: DEFAULT_AGENT_COMMISSION
+        note: note || null,
+        status: 'pending',
+        applied_at: new Date().toISOString(),
+        commission: DEFAULT_AGENT_COMMISSION,
+        updated_at: new Date().toISOString()
       }, {
-        onConflict: 'email'
+        onConflict: 'id'
       });
 
     if (error) throw error;
@@ -835,27 +857,29 @@ app.post('/api/agent/review', async (req, res) => {
 
     const { agent_id, decision, commission } = req.body || {};
 
-    if (!agent_id || !['approved', 'rejected', 'none'].includes(decision)) {
+    if (!agent_id || !['approved', 'rejected'].includes(decision)) {
       return res.status(400).json({ error: 'Missing agent_id or invalid decision.' });
     }
 
     const update = {
-      agent_status: decision,
-      agent_reviewed_at: new Date().toISOString()
+      status: decision,
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: admin.id,
+      updated_at: new Date().toISOString()
     };
 
     if (decision === 'approved') {
       const pct = Number(commission);
-      update.agent_commission = Number.isFinite(pct) && pct > 0 && pct < 100
+      update.commission = Number.isFinite(pct) && pct > 0 && pct < 100
         ? pct
         : DEFAULT_AGENT_COMMISSION;
     }
 
     const { data, error } = await supabase
-      .from('contacts')
+      .from('travel_agents')
       .update(update)
       .eq('id', agent_id)
-      .select('id, email, agency_name, agent_status, agent_commission')
+      .select('id, email, agency_name, status, commission')
       .single();
 
     if (error) throw error;
@@ -864,7 +888,7 @@ app.post('/api/agent/review', async (req, res) => {
       by: admin.email,
       agent: data.email,
       decision,
-      commission: data.agent_commission
+      commission: data.commission
     });
 
     return res.json({ success: true, agent: data });
