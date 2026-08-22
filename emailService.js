@@ -12,15 +12,16 @@ function escapeHtml(value) {
 }
 
 function formatMoney(amountMinor, currency) {
-  const value = Number(amountMinor || 0) / 100;
+  const amount = Number(amountMinor || 0) / 100;
+  const code = String(currency || 'EUR').toUpperCase();
 
   try {
     return new Intl.NumberFormat('en-GB', {
       style: 'currency',
-      currency: String(currency || 'EUR').toUpperCase()
-    }).format(value);
+      currency: code
+    }).format(amount);
   } catch {
-    return `${value.toFixed(2)} ${String(currency || 'EUR').toUpperCase()}`;
+    return `${amount.toFixed(2)} ${code}`;
   }
 }
 
@@ -28,9 +29,9 @@ function formatBookingDateTime(date, time) {
   if (!date) return 'To be confirmed';
 
   const raw = `${date}T${time || '00:00'}`;
-  const parsed = new Date(raw);
+  const value = new Date(raw);
 
-  if (Number.isNaN(parsed.getTime())) {
+  if (Number.isNaN(value.getTime())) {
     return time ? `${date} at ${time}` : date;
   }
 
@@ -38,12 +39,16 @@ function formatBookingDateTime(date, time) {
     dateStyle: 'full',
     timeStyle: 'short',
     timeZone: 'Europe/Lisbon'
-  }).format(parsed);
+  }).format(value);
 }
 
 function bookingReference(booking) {
-  const sessionId = String(booking.stripe_checkout_session_id || '');
-  if (sessionId) return sessionId.slice(-10).toUpperCase();
+  const stripeSessionId = String(booking.stripe_checkout_session_id || '');
+
+  if (stripeSessionId) {
+    return stripeSessionId.slice(-10).toUpperCase();
+  }
+
   return String(booking.id || 'PENDING').slice(-10).toUpperCase();
 }
 
@@ -56,12 +61,14 @@ function buildBookingConfirmationEmail(booking) {
     formatBookingDateTime(booking.booking_date, booking.booking_time)
   );
   const passengers = escapeHtml(booking.passengers || '—');
-  const flightNumber = booking.flight_number
-    ? escapeHtml(booking.flight_number)
-    : '';
   const payment = escapeHtml(
     formatMoney(booking.amount_total, booking.currency)
   );
+
+  const flightNumber = booking.flight_number
+    ? escapeHtml(booking.flight_number)
+    : '';
+
   const appUrl = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
   const myAccountUrl = `${appUrl}/myaccount`;
   const supportUrl = `${appUrl}/support`;
@@ -84,7 +91,7 @@ function buildBookingConfirmationEmail(booking) {
   <title>Booking confirmed</title>
 </head>
 <body style="margin:0;padding:0;background:#E8EBE7;font-family:Arial,Helvetica,sans-serif;color:#111827;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#E8EBE7;padding:32px 16px;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#E8EBE7;padding:32px 16px;">
     <tr>
       <td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:640px;background:#ffffff;border-radius:20px;overflow:hidden;">
@@ -110,7 +117,7 @@ function buildBookingConfirmationEmail(booking) {
                 <div style="margin-top:5px;font-size:18px;font-weight:700;color:#333B50;">${reference}</div>
               </div>
 
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">
                 <tr>
                   <td style="padding:14px 0;color:#6b7280;">Pick-up</td>
                   <td style="padding:14px 0;text-align:right;font-weight:600;color:#111827;">${pickup}</td>
@@ -214,7 +221,10 @@ export async function sendBookingConfirmation({ to, booking }) {
     text,
     tags: [
       { name: 'type', value: 'booking-confirmation' },
-      { name: 'booking-id', value: String(booking.id || booking.stripe_checkout_session_id || 'unknown') }
+      {
+        name: 'booking-id',
+        value: String(booking.id || booking.stripe_checkout_session_id || 'unknown')
+      }
     ]
   });
 
