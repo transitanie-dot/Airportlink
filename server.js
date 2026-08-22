@@ -901,6 +901,79 @@ app.post('/api/agent/review', async (req, res) => {
   }
 });
 
+// Edição dos dados da agência.
+//
+// Passa pelo servidor porque travel_agents não tem política de UPDATE
+// para o papel authenticated. A lista de campos é branca de propósito:
+// status e commission nunca são aceites, venham como vierem no pedido.
+app.post('/api/agent/profile', async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Not signed in' });
+    }
+
+    const { data: existing } = await supabase
+      .from('travel_agents')
+      .select('id, status')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'No partner account found.' });
+    }
+
+    const {
+      agency_name,
+      agency_vat,
+      agency_country,
+      agency_phone,
+      agency_website,
+      contact_name
+    } = req.body || {};
+
+    if (!agency_name || !agency_country || !agency_phone) {
+      return res.status(400).json({
+        error: 'Agency name, country and phone are required.'
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('travel_agents')
+      .update({
+        agency_name,
+        agency_vat: agency_vat || null,
+        agency_country,
+        agency_phone,
+        agency_website: agency_website || null,
+        contact_name: contact_name || null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select('id, email, contact_name, agency_name, agency_vat, agency_country, agency_phone, agency_website, status, commission')
+      .single();
+
+    if (error) throw error;
+
+    // O nome de contacto também vive na contacts, que é a ficha da
+    // pessoa. Mantemos as duas alinhadas.
+    if (contact_name) {
+      await supabase.from('contacts')
+        .update({ full_name: contact_name })
+        .eq('id', user.id);
+    }
+
+    return res.json({ success: true, profile: data });
+  } catch (error) {
+    console.error('agent/profile error:', error);
+
+    return res.status(500).json({
+      error: 'Could not save your agency details.'
+    });
+  }
+});
+
 // Extrato mensal consolidado. O agente paga viagem a viagem; isto é
 // o documento único para a contabilidade dele.
 app.get('/api/agent/statement', async (req, res) => {
