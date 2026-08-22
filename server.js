@@ -21,6 +21,12 @@ const supabase = createClient(
 
 const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
 const FREE_CANCELLATION_HOURS = Number(process.env.FREE_CANCELLATION_HOURS || 24);
+
+// Os agentes têm uma janela mais generosa. É uma das condições do
+// programa de parceria e não custa dinheiro.
+const AGENT_CANCELLATION_HOURS = Number(process.env.AGENT_CANCELLATION_HOURS || 12);
+const DEFAULT_AGENT_COMMISSION = Number(process.env.DEFAULT_AGENT_COMMISSION || 12);
+
 const FX_MARGIN = Number(process.env.FX_MARGIN || 0.02);
 
 const FALLBACK_RATES = {
@@ -188,6 +194,74 @@ async function getDistanceAndDuration(pickup, dropoff) {
       (pickup || '').toLowerCase().includes('portugal') &&
       (dropoff || '').toLowerCase().includes('portugal')
   };
+}
+
+// ============================================================
+// IDENTIDADE E AGENTES
+//
+// A margem do agente é SEMPRE calculada aqui, a partir do JWT. Se
+// viesse do browser, qualquer pessoa reclamava 12% de desconto.
+// ============================================================
+
+async function getUserFromRequest(req) {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+
+  if (!token) {
+    return null;
+  }
+
+  const { data, error } = await supabase.auth.getUser(token);
+
+  if (error || !data?.user) {
+    return null;
+  }
+
+  return data.user;
+}
+
+async function getApprovedAgent(user) {
+  if (!user) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('contacts')
+    .select('id, email, full_name, agency_name, agent_status, agent_commission')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (error || !data || data.agent_status !== 'approved') {
+    return null;
+  }
+
+  const pct = Number(data.agent_commission);
+
+  return {
+    ...data,
+    commission: Number.isFinite(pct) && pct > 0 && pct < 100
+      ? pct
+      : DEFAULT_AGENT_COMMISSION
+  };
+}
+
+async function requireAdmin(req) {
+  const user = await getUserFromRequest(req);
+
+  if (!user) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('contacts')
+    .select('id, email, is_admin')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (error || !data || data.is_admin !== true) {
+    return null;
+  }
+
+  return user;
 }
 
 const ALLOWED_ORIGINS = [
@@ -370,11 +444,15 @@ app.post('/api/create-checkout-session', async (req, res) => {
     isPortugalRoute
   );
 
-  const priceInCurrency = convertFromEUR(
-    priceEUR,
-    currency,
-    rates
-  );
+  // Se quem pede for um agente aprovado, aplica-se a margem dele.
+  // O browser não tem palavra nenhuma nisto.
+  const requester = await getUserFromRequest(req);
+  const agent = await getApprovedAgent(requester);
+  const commission = agent ? agent.commission : 0;
+  const netPriceEUR = priceEUR * (1 - commission / 100);
+
+  const grossInCurrency = convertFromEUR(priceEUR, currency, rates);
+  const priceInCurrency = convertFromEUR(netPriceEUR, currency, rates);
 
   const amount = toStripeAmount(priceInCurrency, currency);
 
@@ -403,7 +481,13 @@ app.post('/api/create-checkout-session', async (req, res) => {
     price: String(priceInCurrency.toFixed(2)),
     distance_km: String(distanceKm.toFixed(1)),
     duration_minutes: String(durationMinutes),
-    status: 'paid'
+    status: 'paid',
+    booked_by: agent ? agent.id : '',
+    agent_commission_pct: agent ? String(commission) : '',
+    agent_gross_price: agent ? String(grossInCurrency.toFixed(2)) : '',
+    passenger_name: booking.passenger_name || '',
+    passenger_email: booking.passenger_email || '',
+    passenger_phone: booking.passenger_phone || ''
   };
 
   try {
@@ -440,7 +524,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
     return res.json({
       url: session.url,
-      sessionId: session.id
+      sessionId: session.id,
+      agent: agent
+        ? { commission, agency_name: agent.agency_name }
+        : null
     });
   } catch (error) {
     console.error('Stripe error:', error);
@@ -494,21 +581,12 @@ app.post('/api/confirm-payment', async (req, res) => {
 
 app.post('/api/cancel-booking', async (req, res) => {
   try {
-    const token = (req.headers.authorization || '')
-      .replace(/^Bearer\s+/i, '');
+    const user = await getUserFromRequest(req);
 
-    if (!token) {
+    if (!user) {
       return res.status(401).json({ error: 'Not signed in' });
     }
 
-    const { data: userData, error: userError } =
-      await supabase.auth.getUser(token);
-
-    if (userError || !userData?.user) {
-      return res.status(401).json({ error: 'Invalid session' });
-    }
-
-    const user = userData.user;
     const { booking_id } = req.body;
 
     if (!booking_id) {
@@ -527,6 +605,7 @@ app.post('/api/cancel-booking', async (req, res) => {
 
     const owns =
       booking.user_id === user.id ||
+      booking.booked_by === user.id ||
       String(booking.email || '').toLowerCase() ===
         String(user.email || '').toLowerCase();
 
@@ -548,16 +627,23 @@ app.post('/api/cancel-booking', async (req, res) => {
 
     const hoursUntil = (pickupAt.getTime() - Date.now()) / 36e5;
 
+    // Agentes têm 12 horas em vez de 24, mas só nas reservas que
+    // eles próprios fizeram.
+    const agent = await getApprovedAgent(user);
+    const windowHours = (agent && booking.booked_by === user.id)
+      ? AGENT_CANCELLATION_HOURS
+      : FREE_CANCELLATION_HOURS;
+
     if (!Number.isFinite(hoursUntil)) {
       return res.status(400).json({
         error: 'This booking has no valid pick-up time. Please contact support.'
       });
     }
 
-    if (hoursUntil < FREE_CANCELLATION_HOURS) {
+    if (hoursUntil < windowHours) {
       return res.status(400).json({
         error:
-          `Free cancellation closes ${FREE_CANCELLATION_HOURS} hours before pick-up. ` +
+          `Free cancellation closes ${windowHours} hours before pick-up. ` +
           'Please contact support.'
       });
     }
@@ -611,6 +697,260 @@ app.post('/api/cancel-booking', async (req, res) => {
 
     return res.status(500).json({
       error: 'Something went wrong. Please contact support.'
+    });
+  }
+});
+
+// ============================================================
+// PROGRAMA DE AGENTES
+// ============================================================
+
+app.get('/api/agent/me', async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Not signed in' });
+    }
+
+    const { data, error } = await supabase
+      .from('contacts')
+      .select(
+        'id, email, full_name, agency_name, agency_vat, agency_country, ' +
+        'agency_website, agency_phone, agent_status, agent_commission'
+      )
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    return res.json({
+      email: user.email,
+      status: data?.agent_status || 'none',
+      commission: data?.agent_status === 'approved'
+        ? Number(data.agent_commission || DEFAULT_AGENT_COMMISSION)
+        : null,
+      agency_name: data?.agency_name || null,
+      cancellation_hours: AGENT_CANCELLATION_HOURS,
+      profile: data || null
+    });
+  } catch (error) {
+    console.error('agent/me error:', error);
+
+    return res.status(500).json({
+      error: 'Could not load your agent status.'
+    });
+  }
+});
+
+// Cria SEMPRE o estado 'pending'. A aprovação é manual e só o
+// service role a pode escrever, porque a coluna está revogada ao
+// papel authenticated.
+app.post('/api/agent/apply', async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Please sign in first.' });
+    }
+
+    const {
+      agency_name,
+      agency_vat,
+      agency_country,
+      agency_website,
+      agency_phone,
+      note,
+      full_name
+    } = req.body || {};
+
+    if (!agency_name || !agency_country || !agency_phone) {
+      return res.status(400).json({
+        error: 'Agency name, country and phone are required.'
+      });
+    }
+
+    const { data: existing } = await supabase
+      .from('contacts')
+      .select('agent_status')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (existing?.agent_status === 'approved') {
+      return res.status(400).json({
+        error: 'Your agency is already approved.'
+      });
+    }
+
+    if (existing?.agent_status === 'pending') {
+      return res.status(400).json({
+        error: 'Your application is already under review.'
+      });
+    }
+
+    const { error } = await supabase
+      .from('contacts')
+      .upsert({
+        id: user.id,
+        email: user.email,
+        full_name: full_name || user.user_metadata?.full_name || null,
+        agency_name,
+        agency_vat: agency_vat || null,
+        agency_country,
+        agency_website: agency_website || null,
+        agency_phone,
+        agent_note: note || null,
+        agent_status: 'pending',
+        agent_applied_at: new Date().toISOString(),
+        agent_commission: DEFAULT_AGENT_COMMISSION
+      }, {
+        onConflict: 'email'
+      });
+
+    if (error) throw error;
+
+    return res.json({ success: true, status: 'pending' });
+  } catch (error) {
+    console.error('agent/apply error:', error);
+
+    return res.status(500).json({
+      error: 'Could not submit your application. Please try again.'
+    });
+  }
+});
+
+// Aprovação e recusa.
+//
+// Passa pelo servidor porque o SQL revoga o update das colunas
+// agent_status e agent_commission ao papel authenticated — e o
+// admin também é authenticated, por isso não conseguiria escrever
+// a partir do browser. Uma revogação de coluna não distingue papéis.
+app.post('/api/agent/review', async (req, res) => {
+  try {
+    const admin = await requireAdmin(req);
+
+    if (!admin) {
+      return res.status(403).json({ error: 'Administrator access required.' });
+    }
+
+    const { agent_id, decision, commission } = req.body || {};
+
+    if (!agent_id || !['approved', 'rejected', 'none'].includes(decision)) {
+      return res.status(400).json({ error: 'Missing agent_id or invalid decision.' });
+    }
+
+    const update = {
+      agent_status: decision,
+      agent_reviewed_at: new Date().toISOString()
+    };
+
+    if (decision === 'approved') {
+      const pct = Number(commission);
+      update.agent_commission = Number.isFinite(pct) && pct > 0 && pct < 100
+        ? pct
+        : DEFAULT_AGENT_COMMISSION;
+    }
+
+    const { data, error } = await supabase
+      .from('contacts')
+      .update(update)
+      .eq('id', agent_id)
+      .select('id, email, agency_name, agent_status, agent_commission')
+      .single();
+
+    if (error) throw error;
+
+    console.log('Agent reviewed:', {
+      by: admin.email,
+      agent: data.email,
+      decision,
+      commission: data.agent_commission
+    });
+
+    // Quando houver email de aprovação, é aqui que ele sai.
+
+    return res.json({ success: true, agent: data });
+  } catch (error) {
+    console.error('agent/review error:', error);
+
+    return res.status(500).json({
+      error: 'Could not update the application.'
+    });
+  }
+});
+
+// Extrato mensal consolidado. O agente paga viagem a viagem; isto é
+// o documento único para a contabilidade dele.
+app.get('/api/agent/statement', async (req, res) => {
+  try {
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Not signed in' });
+    }
+
+    const agent = await getApprovedAgent(user);
+
+    if (!agent) {
+      return res.status(403).json({ error: 'Your agency is not approved yet.' });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(String(req.query.month || ''))
+      ? String(req.query.month)
+      : new Date().toISOString().slice(0, 7);
+
+    const start = `${month}-01`;
+    const endDate = new Date(start);
+    endDate.setMonth(endDate.getMonth() + 1);
+    const end = endDate.toISOString().slice(0, 10);
+
+    const { data, error } = await supabase
+      .from('bookings')
+      .select(
+        'id, booking_id, booking_reference, booking_date, booking_time, ' +
+        'pickup, dropoff, passengers, price, agent_gross_price, ' +
+        'agent_commission_pct, currency, status, full_name, ' +
+        'passenger_name, flight_number'
+      )
+      .eq('booked_by', user.id)
+      .gte('booking_date', start)
+      .lt('booking_date', end)
+      .order('booking_date', { ascending: true });
+
+    if (error) throw error;
+
+    const rows = data || [];
+    const billable = rows.filter((row) => row.status !== 'cancelled');
+
+    const net = billable.reduce(
+      (sum, row) => sum + (Number(row.price) || 0),
+      0
+    );
+
+    const gross = billable.reduce(
+      (sum, row) => sum + (Number(row.agent_gross_price) || Number(row.price) || 0),
+      0
+    );
+
+    return res.json({
+      month,
+      agency_name: agent.agency_name,
+      agent_email: agent.email,
+      commission: agent.commission,
+      currency: billable[0]?.currency || 'EUR',
+      bookings: rows,
+      totals: {
+        count: billable.length,
+        gross: Number(gross.toFixed(2)),
+        net: Number(net.toFixed(2)),
+        saved: Number((gross - net).toFixed(2))
+      }
+    });
+  } catch (error) {
+    console.error('agent/statement error:', error);
+
+    return res.status(500).json({
+      error: 'Could not build your statement.'
     });
   }
 });
@@ -690,6 +1030,16 @@ app.post('/api/stripe-webhook', async (req, res) => {
       duration_minutes: metadata.duration_minutes
         ? parseInt(metadata.duration_minutes, 10)
         : null,
+      booked_by: metadata.booked_by || null,
+      agent_commission_pct: metadata.agent_commission_pct
+        ? Number(metadata.agent_commission_pct)
+        : null,
+      agent_gross_price: metadata.agent_gross_price
+        ? Number(metadata.agent_gross_price)
+        : null,
+      passenger_name: metadata.passenger_name || null,
+      passenger_email: metadata.passenger_email || null,
+      passenger_phone: metadata.passenger_phone || null,
       status: metadata.status || session.payment_status || 'paid',
       payment_status: session.payment_status || null,
       amount_total: session.amount_total || null,
@@ -744,6 +1094,34 @@ app.post('/api/stripe-webhook', async (req, res) => {
         recipientEmail,
         error: emailError.message
       });
+    }
+
+    // Reserva feita por um agente: a confirmação acima foi para a
+    // agência, que é quem paga. Se o agente indicou o email do
+    // viajante, este recebe a sua própria cópia.
+    const passengerEmail = savedBooking.passenger_email;
+
+    if (
+      passengerEmail &&
+      passengerEmail.toLowerCase() !== String(recipientEmail || '').toLowerCase()
+    ) {
+      try {
+        await sendBookingConfirmation({
+          to: passengerEmail,
+          booking: savedBooking
+        });
+
+        console.log('Passenger copy sent:', {
+          bookingId: savedBooking.id,
+          passengerEmail
+        });
+      } catch (emailError) {
+        console.error('Passenger copy failed:', {
+          bookingId: savedBooking.id,
+          passengerEmail,
+          error: emailError.message
+        });
+      }
     }
   }
 
