@@ -2,6 +2,9 @@ import { Resend } from 'resend';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+const LOGO_URL =
+  'https://static.wixstatic.com/media/cfd5b8_41ccb08dceae4e50aa0eff5c08ea8f1f~mv2.png';
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -61,7 +64,7 @@ function buildBookingConfirmationEmail(booking) {
     formatBookingDateTime(booking.booking_date, booking.booking_time)
   );
   const passengers = escapeHtml(booking.passengers || '—');
-  const payment = escapeHtml(
+  const amountPaid = escapeHtml(
     formatMoney(booking.amount_total, booking.currency)
   );
 
@@ -96,9 +99,18 @@ function buildBookingConfirmationEmail(booking) {
       <td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:640px;background:#ffffff;border-radius:20px;overflow:hidden;">
           <tr>
-            <td style="background:#333B50;padding:28px 32px;">
-              <div style="font-size:24px;line-height:1.2;font-weight:700;color:#ffffff;">Airportlink</div>
-              <div style="margin-top:6px;font-size:14px;color:#E8EBE7;">Private airport transfers</div>
+            <td style="background:#333B50;padding:22px 32px;text-align:center;">
+              <a href="${appUrl}" style="display:inline-block;text-decoration:none;background:#ffffff;border-radius:10px;padding:10px 16px;">
+                <img
+                  src="${LOGO_URL}"
+                  alt="Airportlink"
+                  width="260"
+                  style="display:block;width:260px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;"
+                >
+              </a>
+              <div style="margin-top:10px;font-size:14px;color:#E8EBE7;">
+                Private airport transfers
+              </div>
             </td>
           </tr>
 
@@ -136,24 +148,28 @@ function buildBookingConfirmationEmail(booking) {
                 </tr>
                 ${flightRow}
                 <tr>
-                  <td style="padding:14px 0;color:#6b7280;">Paid</td>
-                  <td style="padding:14px 0;text-align:right;font-size:18px;font-weight:700;color:#333B50;">${payment}</td>
+                  <td style="padding:14px 0;color:#6b7280;">Amount paid</td>
+                  <td style="padding:14px 0;text-align:right;font-size:18px;font-weight:700;color:#333B50;">${amountPaid}</td>
                 </tr>
               </table>
 
               <p style="margin:24px 0 0;font-size:15px;line-height:1.6;color:#4b5563;">
-                Please review your transfer details. You can manage your booking from your Airportlink account.
+                You can manage or cancel your booking securely from your Airportlink account. Free cancellation is available up to 24 hours before your scheduled pick-up time.
               </p>
 
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:24px;">
                 <tr>
                   <td style="background:#333B50;border-radius:8px;">
                     <a href="${myAccountUrl}" style="display:inline-block;padding:13px 20px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;">
-                      View my booking
+                      Manage booking securely
                     </a>
                   </td>
                 </tr>
               </table>
+
+              <p style="margin:18px 0 0;font-size:13px;line-height:1.6;color:#6b7280;">
+                You will be asked to sign in if you are not already signed in.
+              </p>
 
               <p style="margin:24px 0 0;font-size:14px;line-height:1.6;color:#6b7280;">
                 Need help? Visit <a href="${supportUrl}" style="color:#333B50;font-weight:700;text-decoration:none;">Airportlink Support</a>.
@@ -162,8 +178,13 @@ function buildBookingConfirmationEmail(booking) {
           </tr>
 
           <tr>
-            <td style="padding:20px 32px;background:#f5f7f5;font-size:12px;line-height:1.5;color:#6b7280;">
-              This is a transactional email regarding your Airportlink booking. Please keep this email for your records.
+            <td style="padding:20px 32px;background:#f5f7f5;font-size:12px;line-height:1.55;color:#6b7280;">
+              <div style="margin-bottom:10px;">
+                <strong style="color:#333B50;">Security note:</strong> Airportlink will never ask you by email for your password, card details, or verification code. For your security, only use links that start with https://www.airportlink.app.
+              </div>
+              <div>
+                This email confirms your Airportlink booking and payment. Your booking remains subject to the applicable cancellation policy. It is not a tax invoice or proof that the transfer has been completed.
+              </div>
             </td>
           </tr>
         </table>
@@ -184,11 +205,20 @@ function buildBookingConfirmationEmail(booking) {
     `Destination: ${booking.dropoff || 'To be confirmed'}`,
     `Date and time: ${formatBookingDateTime(booking.booking_date, booking.booking_time)}`,
     `Passengers: ${booking.passengers || '—'}`,
-    booking.flight_number ? `Flight number: ${booking.flight_number}` : null,
-    `Paid: ${formatMoney(booking.amount_total, booking.currency)}`,
+    booking.flight_number
+      ? `Flight number: ${booking.flight_number}`
+      : null,
+    `Amount paid: ${formatMoney(booking.amount_total, booking.currency)}`,
     '',
-    `Manage your booking: ${myAccountUrl}`,
-    `Support: ${supportUrl}`
+    'You can manage or cancel your booking securely from your Airportlink account.',
+    'Free cancellation is available up to 24 hours before your scheduled pick-up time.',
+    'You will be asked to sign in if you are not already signed in.',
+    '',
+    `Manage booking securely: ${myAccountUrl}`,
+    `Support: ${supportUrl}`,
+    '',
+    'Security note: Airportlink will never ask you by email for your password, card details, or verification code.',
+    'This email confirms your Airportlink booking and payment. It is not a tax invoice or proof that the transfer has been completed.'
   ].filter(Boolean).join('\n');
 
   return {
@@ -223,7 +253,11 @@ export async function sendBookingConfirmation({ to, booking }) {
       { name: 'type', value: 'booking-confirmation' },
       {
         name: 'booking-id',
-        value: String(booking.id || booking.stripe_checkout_session_id || 'unknown')
+        value: String(
+          booking.id ||
+          booking.stripe_checkout_session_id ||
+          'unknown'
+        )
       }
     ]
   });
