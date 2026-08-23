@@ -147,6 +147,16 @@ function toStripeAmount(amount, currencyCode) {
     : Math.round(amount * 100);
 }
 
+// Inverso do toStripeAmount: converte o que vem do Stripe (unidades
+// menores) para a unidade que guardamos na base de dados.
+function fromStripeAmount(amount, currencyCode) {
+  const code = (currencyCode || 'EUR').toUpperCase();
+
+  return ZERO_DECIMAL_CURRENCIES.includes(code)
+    ? Number(amount)
+    : Number(amount) / 100;
+}
+
 function computePriceEUR(distanceKm, passengers, isPortugalRoute) {
   const pricing = isPortugalRoute
     ? {
@@ -246,11 +256,14 @@ async function getApprovedAgent(user) {
   };
 }
 
+// Devolve { user } ou { error } — a distinção importa: "não estás
+// autenticado" e "esta conta não é admin" pedem ações diferentes, e
+// no mesmo browser é fácil a sessão ter sido substituída por outra.
 async function requireAdmin(req) {
   const user = await getUserFromRequest(req);
 
   if (!user) {
-    return null;
+    return { error: 'Not signed in. Your session may have expired or been replaced.' };
   }
 
   const { data, error } = await supabase
@@ -259,11 +272,18 @@ async function requireAdmin(req) {
     .eq('id', user.id)
     .maybeSingle();
 
-  if (error || !data || data.is_admin !== true) {
-    return null;
+  if (error) {
+    return { error: 'Could not verify your account.' };
   }
 
-  return user;
+  if (!data || data.is_admin !== true) {
+    return {
+      error: `You are signed in as ${user.email}, which is not an administrator account. ` +
+             'Sign out and sign in with your admin account.'
+    };
+  }
+
+  return { user };
 }
 
 const ALLOWED_ORIGINS = [
@@ -673,9 +693,10 @@ app.post('/api/cancel-booking', async (req, res) => {
       .from('bookings')
       .update({
         status: 'cancelled',
-        payment_status: refundId
-          ? 'refunded'
-          : booking.payment_status,
+        payment_status: refundId ? 'refunded' : booking.payment_status,
+        refunded_amount: refundId ? Number(booking.price || 0) : booking.refunded_amount,
+        refunded_at: refundId ? new Date().toISOString() : booking.refunded_at,
+        refund_reason: refundId ? 'Cancelled by customer within the free window' : booking.refund_reason,
         updated_at: new Date().toISOString()
       })
       .eq('id', booking_id);
@@ -704,6 +725,163 @@ app.post('/api/cancel-booking', async (req, res) => {
 });
 
 // ============================================================
+// REEMBOLSO MANUAL (ADMIN)
+//
+// Para os casos fora da janela de cancelamento automático, onde a
+// decisão é comercial e tem de ser de uma pessoa. Aceita reembolso
+// parcial e não obriga a cancelar a reserva — às vezes devolve-se
+// uma diferença sem anular o transfer.
+// ============================================================
+app.post('/api/admin/refund', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+
+    if (!admin) {
+      return res.status(403).json({ error: adminError || 'Administrator access required.' });
+    }
+
+    const { booking_id, amount, cancel_booking, reason } = req.body || {};
+
+    if (!booking_id) {
+      return res.status(400).json({ error: 'Missing booking_id' });
+    }
+
+    const { data: booking, error: bookingError } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (bookingError || !booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (!booking.stripe_payment_intent_id) {
+      return res.status(400).json({
+        error: 'This booking has no Stripe payment on file. Nothing to refund here.'
+      });
+    }
+
+    const currency = booking.currency || 'EUR';
+
+    // amount_total vem do Stripe em unidades menores e é a fonte de
+    // verdade do que foi realmente cobrado. O price é o que
+    // mostrámos, que pode divergir por arredondamento.
+    const paidMajor = booking.amount_total
+      ? fromStripeAmount(booking.amount_total, currency)
+      : Number(booking.price || 0);
+
+    const alreadyMajor = Number(booking.refunded_amount || 0);
+    const remainingMajor = Number((paidMajor - alreadyMajor).toFixed(2));
+
+    if (remainingMajor <= 0) {
+      return res.status(400).json({
+        error: 'This booking has already been fully refunded.'
+      });
+    }
+
+    let refundMajor = remainingMajor;
+
+    if (amount !== undefined && amount !== null && amount !== '') {
+      const requested = Number(amount);
+
+      if (!Number.isFinite(requested) || requested <= 0) {
+        return res.status(400).json({ error: 'Refund amount must be a positive number.' });
+      }
+
+      if (requested > remainingMajor + 0.001) {
+        return res.status(400).json({
+          error: `Only ${remainingMajor.toFixed(2)} ${currency} is left to refund on this booking.`
+        });
+      }
+
+      refundMajor = requested;
+    }
+
+    const refundMinor = toStripeAmount(refundMajor, currency);
+
+    if (refundMinor <= 0) {
+      return res.status(400).json({ error: 'Refund amount is too small to process.' });
+    }
+
+    let refund;
+
+    try {
+      refund = await stripe.refunds.create({
+        payment_intent: booking.stripe_payment_intent_id,
+        amount: refundMinor,
+        reason: 'requested_by_customer',
+        metadata: {
+          issued_by: admin.email,
+          booking_id: String(booking.id),
+          note: (reason || '').slice(0, 400)
+        }
+      });
+    } catch (error) {
+      console.error('Admin refund error:', error);
+
+      return res.status(502).json({
+        error: error.message || 'Stripe refused the refund.'
+      });
+    }
+
+    const totalRefunded = Number((alreadyMajor + refundMajor).toFixed(2));
+    const fullyRefunded = totalRefunded >= paidMajor - 0.001;
+
+    const update = {
+      refunded_amount: totalRefunded,
+      refunded_at: new Date().toISOString(),
+      refunded_by: admin.id,
+      refund_reason: reason || null,
+      payment_status: fullyRefunded ? 'refunded' : 'partially_refunded',
+      updated_at: new Date().toISOString()
+    };
+
+    if (cancel_booking) {
+      update.status = 'cancelled';
+    }
+
+    const { error: updateError } = await supabase
+      .from('bookings')
+      .update(update)
+      .eq('id', booking_id);
+
+    if (updateError) {
+      console.error('Refund update error:', updateError);
+
+      // O dinheiro já saiu. Não devolvemos erro genérico: quem está
+      // no painel precisa de saber que o Stripe fez a parte dele.
+      return res.status(500).json({
+        error: `Stripe issued refund ${refund.id}, but the booking record could not be updated. ` +
+               'Please fix the booking manually.'
+      });
+    }
+
+    console.log('Manual refund issued:', {
+      by: admin.email,
+      booking: booking.booking_id || booking.id,
+      amount: refundMajor,
+      currency,
+      cancelled: Boolean(cancel_booking)
+    });
+
+    return res.json({
+      success: true,
+      refund_id: refund.id,
+      refunded_now: refundMajor,
+      refunded_total: totalRefunded,
+      remaining: Number((paidMajor - totalRefunded).toFixed(2)),
+      currency,
+      fully_refunded: fullyRefunded
+    });
+  } catch (error) {
+    console.error('admin/refund error:', error);
+
+    return res.status(500).json({ error: 'Something went wrong issuing the refund.' });
+  }
+});
+
+// ============================================================
 // PROGRAMA DE AGENTES
 // ============================================================
 
@@ -718,8 +896,9 @@ app.get('/api/agent/me', async (req, res) => {
     const { data, error } = await supabase
       .from('travel_agents')
       .select(
-        'id, email, contact_name, agency_name, agency_vat, agency_country, ' +
-        'agency_website, agency_phone, note, status, commission, applied_at'
+        'id, email, contact_name, representative_role, legal_name, agency_name, ' +
+        'agency_vat, agency_country, agency_website, agency_phone, note, ' +
+        'status, commission, applied_at'
       )
       .eq('id', user.id)
       .maybeSingle();
@@ -759,18 +938,21 @@ app.post('/api/agent/apply', async (req, res) => {
     }
 
     const {
+      legal_name,
       agency_name,
       agency_vat,
       agency_country,
       agency_website,
       agency_phone,
+      representative_name,
+      representative_role,
       note,
       full_name
     } = req.body || {};
 
-    if (!agency_name || !agency_country || !agency_phone) {
+    if (!legal_name || !agency_country || !agency_phone || !representative_name) {
       return res.status(400).json({
-        error: 'Agency name, country and phone are required.'
+        error: 'Registered company name, country, phone and representative name are required.'
       });
     }
 
@@ -799,7 +981,7 @@ app.post('/api/agent/apply', async (req, res) => {
       .upsert({
         id: user.id,
         email: user.email,
-        full_name: full_name || user.user_metadata?.full_name || null,
+        full_name: representative_name || full_name || user.user_metadata?.full_name || null,
         is_admin: false
       }, {
         onConflict: 'email'
@@ -814,8 +996,11 @@ app.post('/api/agent/apply', async (req, res) => {
       .upsert({
         id: user.id,
         email: user.email,
-        contact_name: full_name || user.user_metadata?.full_name || null,
-        agency_name,
+        contact_name: representative_name || full_name || null,
+        representative_role: representative_role || null,
+        legal_name,
+        // Sem nome comercial, o comercial é o legal.
+        agency_name: agency_name || legal_name,
         agency_vat: agency_vat || null,
         agency_country,
         agency_website: agency_website || null,
@@ -849,10 +1034,10 @@ app.post('/api/agent/apply', async (req, res) => {
 // a partir do browser. Uma revogação de coluna não distingue papéis.
 app.post('/api/agent/review', async (req, res) => {
   try {
-    const admin = await requireAdmin(req);
+    const { user: admin, error: adminError } = await requireAdmin(req);
 
     if (!admin) {
-      return res.status(403).json({ error: 'Administrator access required.' });
+      return res.status(403).json({ error: adminError || 'Administrator access required.' });
     }
 
     const { agent_id, decision, commission } = req.body || {};
@@ -925,33 +1110,37 @@ app.post('/api/agent/profile', async (req, res) => {
     }
 
     const {
+      legal_name,
       agency_name,
       agency_vat,
       agency_country,
       agency_phone,
       agency_website,
-      contact_name
+      contact_name,
+      representative_role
     } = req.body || {};
 
-    if (!agency_name || !agency_country || !agency_phone) {
+    if (!legal_name || !agency_country || !agency_phone || !contact_name) {
       return res.status(400).json({
-        error: 'Agency name, country and phone are required.'
+        error: 'Registered company name, country, phone and representative name are required.'
       });
     }
 
     const { data, error } = await supabase
       .from('travel_agents')
       .update({
-        agency_name,
+        legal_name,
+        agency_name: agency_name || legal_name,
         agency_vat: agency_vat || null,
         agency_country,
         agency_phone,
         agency_website: agency_website || null,
-        contact_name: contact_name || null,
+        contact_name,
+        representative_role: representative_role || null,
         updated_at: new Date().toISOString()
       })
       .eq('id', user.id)
-      .select('id, email, contact_name, agency_name, agency_vat, agency_country, agency_phone, agency_website, status, commission')
+      .select('id, email, contact_name, representative_role, legal_name, agency_name, agency_vat, agency_country, agency_phone, agency_website, status, commission')
       .single();
 
     if (error) throw error;
