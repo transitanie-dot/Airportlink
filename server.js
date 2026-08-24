@@ -8,7 +8,8 @@ import {
   sendCardSaved,
   sendChargeSucceeded,
   sendChargeFailed,
-  sendCancellation
+  sendCancellation,
+  notifyOps
 } from './emailService.js';
 import { createPartnerRoutes } from './partners.js';
 
@@ -1928,6 +1929,21 @@ app.post('/api/tasks/charge-due', async (req, res) => {
         if (giveUp) {
           results.abandoned += 1;
           console.error('Charge abandoned, booking cancelled:', booking.booking_id || booking.id, code);
+
+          // Um aviso para dentro: alguém tem de saber que uma reserva
+          // foi cancelada por não haver pagamento, sobretudo se já
+          // tinha motorista atribuído.
+          await notifyOps('Booking cancelled — payment failed', [
+            `Reference: ${booking.booking_reference || booking.booking_id}`,
+            `Customer: ${booking.full_name || ''} (${booking.email})`,
+            `Pick-up: ${booking.booking_date} ${String(booking.booking_time || '').slice(0, 5)}`,
+            `Route: ${booking.pickup} to ${booking.dropoff}`,
+            `Amount: ${booking.currency} ${booking.price}`,
+            `Last error: ${code} — ${error.message}`,
+            booking.assigned_partner_id
+              ? 'A partner had already taken this ride and has been released.'
+              : 'No partner had taken it.'
+          ]);
         } else {
           results.failed += 1;
           console.warn('Charge failed, will retry:', booking.booking_id || booking.id, code);
