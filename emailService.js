@@ -1,270 +1,496 @@
-import { Resend } from 'resend';
+/**
+ * airportlink-api/emailService.js
+ * ---------------------------------------------------------------
+ * Envio de emails transacionais através do Resend.
+ *
+ * Três decisões que valem a pena explicar:
+ *
+ * 1. A proteção contra duplicados está na BASE DE DADOS, não aqui.
+ *    O Stripe repete webhooks quando não recebe resposta rápida; um
+ *    registo em memória perder-se-ia no primeiro reinício. A chave
+ *    única na email_log é o que garante que ninguém recebe duas
+ *    confirmações da mesma reserva.
+ *
+ * 2. Um email que falha NUNCA quebra o que o desencadeou. Se a
+ *    confirmação não sair, a reserva continua paga e válida. Todas
+ *    as funções apanham os seus próprios erros.
+ *
+ * 3. O fornecedor está isolado numa função. Trocar de Resend para
+ *    outro é reescrever deliver(), e mais nada.
+ * ---------------------------------------------------------------
+ */
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const RESEND_URL = 'https://api.resend.com/emails';
 
-const LOGO_URL =
-  'https://static.wixstatic.com/media/cfd5b8_41ccb08dceae4e50aa0eff5c08ea8f1f~mv2.png';
+const FROM = process.env.EMAIL_FROM || 'Airportlink <bookings@airportlink.app>';
+const REPLY_TO = process.env.EMAIL_REPLY_TO || 'support@airportlink.app';
+const SITE = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+let supabase = null;
+
+/** Chamado uma vez pelo server.js, para não haver dois clientes. */
+export function initEmail(client) {
+  supabase = client;
 }
 
-function formatMoney(amountMinor, currency) {
-  const amount = Number(amountMinor || 0) / 100;
+// ============================================================
+// APRESENTAÇÃO
+// ============================================================
+
+function esc(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function money(amount, currency) {
+  const value = Number(amount || 0);
   const code = String(currency || 'EUR').toUpperCase();
-
   try {
-    return new Intl.NumberFormat('en-GB', {
-      style: 'currency',
-      currency: code
-    }).format(amount);
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: code }).format(value);
   } catch {
-    return `${amount.toFixed(2)} ${code}`;
+    return `${value.toFixed(2)} ${code}`;
   }
 }
 
-function formatBookingDateTime(date, time) {
-  if (!date) return 'To be confirmed';
-
-  const raw = `${date}T${time || '00:00'}`;
-  const value = new Date(raw);
-
-  if (Number.isNaN(value.getTime())) {
-    return time ? `${date} at ${time}` : date;
-  }
-
-  return new Intl.DateTimeFormat('en-GB', {
-    dateStyle: 'full',
-    timeStyle: 'short',
-    timeZone: 'Europe/Lisbon'
-  }).format(value);
+function longDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(`${dateStr}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(dateStr);
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+  });
 }
 
-function bookingReference(booking) {
-  const stripeSessionId = String(booking.stripe_checkout_session_id || '');
-
-  if (stripeSessionId) {
-    return stripeSessionId.slice(-10).toUpperCase();
-  }
-
-  return String(booking.id || 'PENDING').slice(-10).toUpperCase();
+function shortTime(timeStr) {
+  return timeStr ? String(timeStr).slice(0, 5) : '';
 }
 
-function buildBookingConfirmationEmail(booking) {
-  const name = escapeHtml(booking.full_name || 'Customer');
-  const reference = escapeHtml(bookingReference(booking));
-  const pickup = escapeHtml(booking.pickup || 'To be confirmed');
-  const dropoff = escapeHtml(booking.dropoff || 'To be confirmed');
-  const dateTime = escapeHtml(
-    formatBookingDateTime(booking.booking_date, booking.booking_time)
-  );
-  const passengers = escapeHtml(booking.passengers || '—');
-  const amountPaid = escapeHtml(
-    formatMoney(booking.amount_total, booking.currency)
-  );
+/**
+ * O invólucro de todos os emails.
+ *
+ * Tabelas e estilos em linha, de propósito. O Outlook ignora
+ * stylesheets e trata flexbox como se não existisse — é feio de
+ * escrever mas é o que aparece igual em todo o lado.
+ */
+function wrap({ preheader, heading, intro, blocks = [], cta, footNote }) {
+  const rows = blocks.map((b) => {
+    if (b.type === 'facts') {
+      return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="border-collapse:separate;border-spacing:0 8px;margin:8px 0 4px">
+        ${b.items.filter((i) => i.value).map((i) => `
+        <tr>
+          <td style="padding:10px 14px;background:#F3F4F0;border-radius:10px 0 0 10px;
+            font:600 11px/1.4 'IBM Plex Mono',monospace;letter-spacing:.08em;
+            text-transform:uppercase;color:#606A7B;width:38%">${esc(i.label)}</td>
+          <td style="padding:10px 14px;background:#F3F4F0;border-radius:0 10px 10px 0;
+            font:500 15px/1.5 Arial,sans-serif;color:#141A28">${esc(i.value)}</td>
+        </tr>`).join('')}
+      </table>`;
+    }
 
-  const flightNumber = booking.flight_number
-    ? escapeHtml(booking.flight_number)
-    : '';
+    if (b.type === 'route') {
+      return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="margin:14px 0;border:1px solid #E2E5E0;border-radius:14px">
+        <tr><td style="padding:16px 18px">
+          <div style="font:600 10px/1.4 'IBM Plex Mono',monospace;letter-spacing:.1em;
+            text-transform:uppercase;color:#0F766E;margin-bottom:4px">Pick-up</div>
+          <div style="font:500 15px/1.5 Arial,sans-serif;color:#141A28;margin-bottom:14px">${esc(b.from)}</div>
+          <div style="font:600 10px/1.4 'IBM Plex Mono',monospace;letter-spacing:.1em;
+            text-transform:uppercase;color:#606A7B;margin-bottom:4px">Drop-off</div>
+          <div style="font:500 15px/1.5 Arial,sans-serif;color:#141A28">${esc(b.to)}</div>
+        </td></tr></table>`;
+    }
 
-  const appUrl = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
-  const myAccountUrl = `${appUrl}/myaccount`;
-  const supportUrl = `${appUrl}/support`;
+    if (b.type === 'note') {
+      const colours = {
+        ok: ['#ECFDF5', '#A7F3D0', '#065F46'],
+        warn: ['#FDF6E7', '#F0D9A8', '#8A5A12'],
+        bad: ['#FFF1F2', '#FDA29B', '#B42318']
+      };
+      const [bg, border, text] = colours[b.tone] || colours.ok;
+      return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="margin:14px 0"><tr><td style="padding:14px 16px;background:${bg};
+        border:1px solid ${border};border-radius:12px;font:400 14px/1.6 Arial,sans-serif;
+        color:${text}">${b.html}</td></tr></table>`;
+    }
 
-  const flightRow = flightNumber
-    ? `
-      <tr>
-        <td style="padding:8px 0;color:#6b7280;">Flight number</td>
-        <td style="padding:8px 0;text-align:right;font-weight:600;color:#111827;">${flightNumber}</td>
-      </tr>
-    `
-    : '';
+    return `<p style="margin:0 0 14px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${b.html}</p>`;
+  }).join('');
 
-  const html = `
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Booking confirmed</title>
-</head>
-<body style="margin:0;padding:0;background:#E8EBE7;font-family:Arial,Helvetica,sans-serif;color:#111827;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#E8EBE7;padding:32px 16px;">
-    <tr>
-      <td align="center">
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:640px;background:#ffffff;border-radius:20px;overflow:hidden;">
-          <tr>
-            <td style="background:#333B50;padding:22px 32px;text-align:center;">
-              <a href="${appUrl}" style="display:inline-block;text-decoration:none;background:#ffffff;border-radius:10px;padding:10px 16px;">
-                <img
-                  src="${LOGO_URL}"
-                  alt="Airportlink"
-                  width="260"
-                  style="display:block;width:260px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;"
-                >
-              </a>
-              <div style="margin-top:10px;font-size:14px;color:#E8EBE7;">
-                Private airport transfers
-              </div>
-            </td>
-          </tr>
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(heading)}</title></head>
+<body style="margin:0;padding:0;background:#E8EBE7">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0">${esc(preheader || '')}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#E8EBE7">
+<tr><td align="center" style="padding:28px 14px">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+    style="max-width:560px;background:#FBFBF8;border-radius:18px;overflow:hidden">
 
-          <tr>
-            <td style="padding:32px;">
-              <div style="width:52px;height:52px;line-height:52px;text-align:center;background:#ecfdf5;color:#047857;border-radius:50%;font-size:28px;font-weight:700;">✓</div>
+    <tr><td style="padding:20px 26px;background:#141A28">
+      <span style="font:800 18px/1 Arial,sans-serif;letter-spacing:-.5px;color:#FFFFFF">AIRPORT<span style="color:#E8A33D">LINK</span></span>
+    </td></tr>
 
-              <h1 style="margin:20px 0 10px;font-size:28px;line-height:1.2;color:#333B50;">Your booking is confirmed</h1>
+    <tr><td style="padding:28px 26px 8px">
+      <h1 style="margin:0 0 12px;font:700 23px/1.2 Arial,sans-serif;
+        letter-spacing:-.5px;color:#141A28">${esc(heading)}</h1>
+      ${intro ? `<p style="margin:0 0 16px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${intro}</p>` : ''}
+      ${rows}
+      ${cta ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 6px">
+        <tr><td style="background:#0F766E;border-radius:12px">
+          <a href="${esc(cta.href)}" style="display:inline-block;padding:14px 26px;
+            font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;
+            text-transform:uppercase;color:#FFFFFF;text-decoration:none">${esc(cta.label)}</a>
+        </td></tr></table>` : ''}
+    </td></tr>
 
-              <p style="margin:0 0 22px;font-size:16px;line-height:1.6;color:#4b5563;">
-                Hi ${name}, thank you for choosing Airportlink. Your payment was successful and your transfer is confirmed.
-              </p>
+    <tr><td style="padding:18px 26px 26px">
+      ${footNote ? `<p style="margin:0 0 14px;font:400 13px/1.6 Arial,sans-serif;color:#606A7B">${footNote}</p>` : ''}
+      <div style="border-top:1px solid #E2E5E0;padding-top:16px;
+        font:400 12px/1.7 Arial,sans-serif;color:#8A93A3">
+        Questions? Reply to this email or open a chat at
+        <a href="${SITE}/support" style="color:#0F766E">airportlink.app/support</a>.<br>
+        Airportlink &middot; private airport transfers
+      </div>
+    </td></tr>
 
-              <div style="margin:0 0 22px;padding:16px 18px;background:#f5f7f5;border-left:4px solid #333B50;border-radius:8px;">
-                <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;">Booking reference</div>
-                <div style="margin-top:5px;font-size:18px;font-weight:700;color:#333B50;">${reference}</div>
-              </div>
-
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">
-                <tr>
-                  <td style="padding:14px 0;color:#6b7280;">Pick-up</td>
-                  <td style="padding:14px 0;text-align:right;font-weight:600;color:#111827;">${pickup}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#6b7280;">Destination</td>
-                  <td style="padding:8px 0;text-align:right;font-weight:600;color:#111827;">${dropoff}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#6b7280;">Date and time</td>
-                  <td style="padding:8px 0;text-align:right;font-weight:600;color:#111827;">${dateTime}</td>
-                </tr>
-                <tr>
-                  <td style="padding:8px 0;color:#6b7280;">Passengers</td>
-                  <td style="padding:8px 0;text-align:right;font-weight:600;color:#111827;">${passengers}</td>
-                </tr>
-                ${flightRow}
-                <tr>
-                  <td style="padding:14px 0;color:#6b7280;">Amount paid</td>
-                  <td style="padding:14px 0;text-align:right;font-size:18px;font-weight:700;color:#333B50;">${amountPaid}</td>
-                </tr>
-              </table>
-
-              <p style="margin:24px 0 0;font-size:15px;line-height:1.6;color:#4b5563;">
-                You can manage or cancel your booking securely from your Airportlink account. Free cancellation is available up to 24 hours before your scheduled pick-up time.
-              </p>
-
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:24px;">
-                <tr>
-                  <td style="background:#333B50;border-radius:8px;">
-                    <a href="${myAccountUrl}" style="display:inline-block;padding:13px 20px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;">
-                      Manage booking securely
-                    </a>
-                  </td>
-                </tr>
-              </table>
-
-              <p style="margin:18px 0 0;font-size:13px;line-height:1.6;color:#6b7280;">
-                You will be asked to sign in if you are not already signed in.
-              </p>
-
-              <p style="margin:24px 0 0;font-size:14px;line-height:1.6;color:#6b7280;">
-                Need help? Visit <a href="${supportUrl}" style="color:#333B50;font-weight:700;text-decoration:none;">Airportlink Support</a>.
-              </p>
-            </td>
-          </tr>
-
-          <tr>
-            <td style="padding:20px 32px;background:#f5f7f5;font-size:12px;line-height:1.55;color:#6b7280;">
-              <div style="margin-bottom:10px;">
-                <strong style="color:#333B50;">Security note:</strong> Airportlink will never ask you by email for your password, card details, or verification code. For your security, only use links that start with https://www.airportlink.app.
-              </div>
-              <div>
-                This email confirms your Airportlink booking and payment. Your booking remains subject to the applicable cancellation policy. It is not a tax invoice or proof that the transfer has been completed.
-              </div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
   </table>
-</body>
-</html>`.trim();
-
-  const text = [
-    'Airportlink — Booking confirmed',
-    '',
-    `Hi ${booking.full_name || 'Customer'},`,
-    'Your payment was successful and your transfer is confirmed.',
-    '',
-    `Booking reference: ${bookingReference(booking)}`,
-    `Pick-up: ${booking.pickup || 'To be confirmed'}`,
-    `Destination: ${booking.dropoff || 'To be confirmed'}`,
-    `Date and time: ${formatBookingDateTime(booking.booking_date, booking.booking_time)}`,
-    `Passengers: ${booking.passengers || '—'}`,
-    booking.flight_number
-      ? `Flight number: ${booking.flight_number}`
-      : null,
-    `Amount paid: ${formatMoney(booking.amount_total, booking.currency)}`,
-    '',
-    'You can manage or cancel your booking securely from your Airportlink account.',
-    'Free cancellation is available up to 24 hours before your scheduled pick-up time.',
-    'You will be asked to sign in if you are not already signed in.',
-    '',
-    `Manage booking securely: ${myAccountUrl}`,
-    `Support: ${supportUrl}`,
-    '',
-    'Security note: Airportlink will never ask you by email for your password, card details, or verification code.',
-    'This email confirms your Airportlink booking and payment. It is not a tax invoice or proof that the transfer has been completed.'
-  ].filter(Boolean).join('\n');
-
-  return {
-    subject: `Booking confirmed — ${reference}`,
-    html,
-    text
-  };
+</td></tr></table>
+</body></html>`;
 }
 
-export async function sendBookingConfirmation({ to, booking }) {
+// ============================================================
+// ENVIO
+// ============================================================
+
+/**
+ * A única função que fala com o fornecedor. Trocar de Resend para
+ * outro é reescrever isto e mais nada.
+ */
+async function deliver({ to, subject, html, replyTo }) {
   if (!process.env.RESEND_API_KEY) {
     throw new Error('RESEND_API_KEY is not configured');
   }
 
-  if (!process.env.EMAIL_FROM_BOOKINGS) {
-    throw new Error('EMAIL_FROM_BOOKINGS is not configured');
-  }
-
-  if (!to) {
-    throw new Error('Booking recipient email is missing');
-  }
-
-  const { subject, html, text } = buildBookingConfirmationEmail(booking);
-
-  const { data, error } = await resend.emails.send({
-    from: process.env.EMAIL_FROM_BOOKINGS,
-    to: [to],
-    subject,
-    html,
-    text,
-    tags: [
-      { name: 'type', value: 'booking-confirmation' },
-      {
-        name: 'booking-id',
-        value: String(
-          booking.id ||
-          booking.stripe_checkout_session_id ||
-          'unknown'
-        )
-      }
-    ]
+  const response = await fetch(RESEND_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: FROM,
+      to: [to],
+      subject,
+      html,
+      reply_to: replyTo || REPLY_TO
+    })
   });
 
-  if (error) {
-    throw new Error(`Resend failed: ${error.message}`);
+  const text = await response.text();
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Resend returned a non-JSON response (HTTP ${response.status})`);
   }
 
-  return data;
+  if (!response.ok) {
+    throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
+  }
+
+  return data.id || null;
+}
+
+/**
+ * Envia uma vez e só uma.
+ *
+ * A chave única na email_log é o cadeado: se já lá estiver, o insert
+ * falha e desistimos. Fazer a verificação antes do insert não
+ * chegaria — entre a verificação e a escrita cabe outro webhook.
+ */
+async function sendOnce({ key, template, to, subject, html, bookingId, replyTo }) {
+  if (!to) {
+    console.warn(`[email] ${template}: no recipient, skipped`);
+    return { sent: false, reason: 'no-recipient' };
+  }
+
+  if (!supabase) {
+    console.error('[email] initEmail was never called');
+    return { sent: false, reason: 'not-initialised' };
+  }
+
+  const { data: row, error: claimError } = await supabase
+    .from('email_log')
+    .insert({
+      idempotency_key: key,
+      template,
+      recipient: to,
+      subject,
+      booking_id: bookingId || null,
+      status: 'queued'
+    })
+    .select('id')
+    .maybeSingle();
+
+  if (claimError) {
+    // 23505 é violação de unicidade: já foi enviado. Não é um erro,
+    // é exatamente o que queremos que aconteça.
+    if (claimError.code === '23505') {
+      console.log(`[email] ${template} already sent for ${key}`);
+      return { sent: false, reason: 'duplicate' };
+    }
+    console.error('[email] could not claim:', claimError.message);
+    return { sent: false, reason: 'claim-failed' };
+  }
+
+  try {
+    const providerId = await deliver({ to, subject, html, replyTo });
+
+    await supabase.from('email_log').update({
+      status: 'sent',
+      provider_id: providerId,
+      sent_at: new Date().toISOString(),
+      attempts: 1
+    }).eq('id', row.id);
+
+    console.log(`[email] ${template} -> ${to}`);
+    return { sent: true, id: providerId };
+  } catch (error) {
+    await supabase.from('email_log').update({
+      status: 'failed',
+      error: String(error.message).slice(0, 500),
+      attempts: 1
+    }).eq('id', row.id);
+
+    console.error(`[email] ${template} failed:`, error.message);
+    return { sent: false, reason: 'send-failed', error: error.message };
+  }
+}
+
+function reference(booking) {
+  return booking.booking_reference || booking.booking_id || String(booking.id || '').slice(0, 8);
+}
+
+// ============================================================
+// OS EMAILS
+//
+// Cada um apanha os seus próprios erros: se a confirmação não sair,
+// a reserva continua paga e válida. Nunca deixar um email partir o
+// que o desencadeou.
+// ============================================================
+
+/** Pago na reserva. O mais importante de todos. */
+export async function sendBookingConfirmation(booking) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: `Your transfer on ${longDate(booking.booking_date)} is confirmed.`,
+      heading: 'Your transfer is confirmed',
+      intro: `Everything is booked, ${esc(booking.full_name || 'there')}. Here is what will happen.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'Flight', value: booking.flight_number },
+          { label: 'Paid', value: money(booking.price, booking.currency) }
+        ]},
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { type: 'note', tone: 'ok', html:
+          '<strong>Free cancellation until 24 hours before pick-up.</strong><br>' +
+          'Cancel from your account and the full amount goes back to your card, automatically.' },
+        { html: 'The day before your trip we will send you the driver&rsquo;s name, ' +
+          'phone number and vehicle. If you gave us a flight number we track it, so a delay ' +
+          'moves the pick-up and never the price.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: 'See my trip' }
+    });
+
+    return await sendOnce({
+      key: `booking_confirmed:${ref}`,
+      template: 'booking_confirmed',
+      to: booking.passenger_email || booking.email,
+      subject: `Transfer confirmed — ${longDate(booking.booking_date)} at ${shortTime(booking.booking_time)}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] confirmation build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/** Reservado sem pagar: o cartão ficou guardado. */
+export async function sendCardSaved(booking, chargeAt) {
+  try {
+    const ref = reference(booking);
+    const when = chargeAt
+      ? new Date(chargeAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })
+      : '48 hours before pick-up';
+
+    const html = wrap({
+      preheader: `Booked. We charge ${money(booking.price, booking.currency)} on ${when}.`,
+      heading: 'Your transfer is booked',
+      intro: 'Nothing has been charged yet. Your card is saved securely with Stripe and we will ' +
+        'take the fare shortly before you travel.',
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'To be charged', value: money(booking.price, booking.currency) },
+          { label: 'Charge date', value: when }
+        ]},
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { type: 'note', tone: 'warn', html:
+          `<strong>We charge ${esc(money(booking.price, booking.currency))} on ${esc(when)}.</strong><br>` +
+          'Cancel before then and nothing is ever taken from your card. ' +
+          'Make sure the card is still valid on that date.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: 'See my trip' }
+    });
+
+    return await sendOnce({
+      key: `card_saved:${ref}`,
+      template: 'card_saved',
+      to: booking.passenger_email || booking.email,
+      subject: `Transfer booked — payment on ${when}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] card saved build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/** A cobrança agendada correu bem. */
+export async function sendChargeSucceeded(booking) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: `We have taken ${money(booking.price, booking.currency)} for your transfer.`,
+      heading: 'Payment received',
+      intro: 'Your transfer is fully paid and confirmed.',
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Charged', value: money(booking.price, booking.currency) },
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) }
+        ]},
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { html: 'We will send the driver&rsquo;s details the day before you travel.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: 'See my trip' }
+    });
+
+    return await sendOnce({
+      key: `charge_succeeded:${ref}`,
+      template: 'charge_succeeded',
+      to: booking.passenger_email || booking.email,
+      subject: `Payment received — transfer on ${longDate(booking.booking_date)}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] charge success build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/**
+ * A cobrança falhou. A chave inclui o número da tentativa: cada uma
+ * é um email novo, senão a segunda e a terceira ficavam em silêncio.
+ */
+export async function sendChargeFailed(booking, { attempt, willRetry }) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: 'We could not take payment for your transfer.',
+      heading: 'We could not take your payment',
+      intro: `Your card was declined for the transfer on ${longDate(booking.booking_date)}.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Amount', value: money(booking.price, booking.currency) },
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) }
+        ]},
+        { type: 'note', tone: willRetry ? 'warn' : 'bad', html: willRetry
+          ? '<strong>We will try again in a few hours.</strong><br>' +
+            'Check that the card is still valid and has funds available. If it will not work, ' +
+            'reply to this email and we will send you a payment link.'
+          : '<strong>This was our last attempt, so the booking has been cancelled.</strong><br>' +
+            'No money was taken. If you still need the transfer, please book again ' +
+            'or reply to this email.' },
+        { html: willRetry
+          ? 'Your booking is still held for now.'
+          : 'We are sorry to do this, but we cannot send a driver to a trip that has not been paid.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: willRetry ? 'Check my booking' : 'Book again' }
+    });
+
+    return await sendOnce({
+      key: `charge_failed:${ref}:${attempt}`,
+      template: 'charge_failed',
+      to: booking.passenger_email || booking.email,
+      subject: willRetry
+        ? 'Payment problem with your transfer'
+        : 'Your transfer has been cancelled — payment failed',
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] charge failed build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/** Cancelamento, com ou sem reembolso. */
+export async function sendCancellation(booking, { refunded, amount }) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: 'Your transfer has been cancelled.',
+      heading: 'Your transfer is cancelled',
+      intro: `The transfer on ${longDate(booking.booking_date)} has been cancelled as you asked.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Was booked for', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) }
+        ]},
+        { type: 'note', tone: 'ok', html: refunded
+          ? `<strong>${esc(money(amount, booking.currency))} is on its way back to your card.</strong><br>` +
+            'We have issued the refund. Your bank usually takes 5 to 10 working days to show it.'
+          : '<strong>Nothing was charged.</strong><br>' +
+            'Your card was saved but never used, and we have now removed it.' },
+        { html: 'If you need another transfer, we are here.' }
+      ],
+      cta: { href: `${SITE}/#book`, label: 'Book another transfer' }
+    });
+
+    return await sendOnce({
+      key: `cancelled:${ref}`,
+      template: 'cancelled',
+      to: booking.passenger_email || booking.email,
+      subject: `Transfer cancelled — ${ref}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] cancellation build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
 }
