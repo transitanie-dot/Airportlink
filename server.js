@@ -181,6 +181,48 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute) {
   return price < pricing.MIN_PRICE ? pricing.MIN_PRICE : price;
 }
 
+/**
+ * O aeroporto da recolha, a partir do texto que o cliente escreveu.
+ *
+ * É o que liga uma reserva aos parceiros que a podem fazer, por isso
+ * é calculado aqui e guardado — não adivinhado depois. Procura o
+ * código IATA como palavra isolada, e só depois o nome da cidade,
+ * porque "Porto" aparece em "Porto Santo" e em "Portofino".
+ */
+let airportCache = { rows: [], at: 0 };
+
+async function findPickupAirport(pickupText) {
+  const text = String(pickupText || '');
+  if (!text) return { iata: null, city: null };
+
+  if (Date.now() - airportCache.at > 60 * 60 * 1000) {
+    const { data } = await supabase.from('airports')
+      .select('iata, name, city, country').eq('active', true);
+    airportCache = { rows: data || [], at: Date.now() };
+  }
+
+  const upper = text.toUpperCase();
+  const lower = text.toLowerCase();
+
+  const byCode = airportCache.rows.find((a) =>
+    new RegExp(`\\b${a.iata}\\b`).test(upper));
+  if (byCode) return { iata: byCode.iata, city: byCode.city };
+
+  const byName = airportCache.rows.find((a) =>
+    lower.includes(a.name.toLowerCase()));
+  if (byName) return { iata: byName.iata, city: byName.city };
+
+  // A cidade só conta se o texto também disser que é um aeroporto.
+  // Sem isso, um hotel em Lisboa virava recolha no aeroporto.
+  if (/airport|aeroporto|a[ée]roport|flughafen|aeropuerto/i.test(text)) {
+    const byCity = airportCache.rows.find((a) =>
+      lower.includes(a.city.toLowerCase()));
+    if (byCity) return { iata: byCity.iata, city: byCity.city };
+  }
+
+  return { iata: null, city: null };
+}
+
 async function getDistanceAndDuration(pickup, dropoff) {
   const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
 
@@ -372,7 +414,7 @@ app.get('/api/exchange-rates', async (req, res) => {
 
 app.post('/register', async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body;
+    const { name, email, password, phone, preferred_languages } = req.body;
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -412,6 +454,11 @@ app.post('/register', async (req, res) => {
         full_name: name,
         email,
         phone_number: phone || null,
+        // Preferência, não garantia. No máximo duas: mais do que isso
+        // deixa de ser uma preferência e passa a ser uma lista de desejos.
+        preferred_languages: Array.isArray(preferred_languages) && preferred_languages.length
+          ? preferred_languages.slice(0, 2)
+          : null,
         is_admin: false
       }, {
         onConflict: 'email'
@@ -490,6 +537,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   const amount = toStripeAmount(priceInCurrency, currency);
 
+  const pickupAirport = await findPickupAirport(booking.pickup);
+
   const phoneCode = booking.phone_code || booking.phoneCode || '';
   const phoneNumber = booking.phone_number || booking.phoneNumber || '';
 
@@ -521,7 +570,12 @@ app.post('/api/create-checkout-session', async (req, res) => {
     agent_gross_price: agent ? String(grossInCurrency.toFixed(2)) : '',
     passenger_name: booking.passenger_name || '',
     passenger_email: booking.passenger_email || '',
-    passenger_phone: booking.passenger_phone || ''
+    passenger_phone: booking.passenger_phone || '',
+    pickup_airport: pickupAirport.iata || '',
+    pickup_city: pickupAirport.city || '',
+    preferred_languages: Array.isArray(booking.preferred_languages)
+      ? booking.preferred_languages.slice(0, 2).join(',')
+      : ''
   };
 
   try {
@@ -1336,6 +1390,11 @@ app.post('/api/stripe-webhook', async (req, res) => {
       passenger_name: metadata.passenger_name || null,
       passenger_email: metadata.passenger_email || null,
       passenger_phone: metadata.passenger_phone || null,
+      pickup_airport: metadata.pickup_airport || null,
+      pickup_city: metadata.pickup_city || null,
+      preferred_languages: metadata.preferred_languages
+        ? metadata.preferred_languages.split(',').filter(Boolean)
+        : null,
       status: metadata.status || session.payment_status || 'paid',
       payment_status: session.payment_status || null,
       amount_total: session.amount_total || null,
