@@ -540,3 +540,313 @@ export async function sendCancellation(booking, { refunded, amount }) {
     return { sent: false, reason: 'build-failed' };
   }
 }
+
+// ============================================================
+// CLIENTE — ANTES DA VIAGEM
+// ============================================================
+
+/**
+ * O motorista, na véspera.
+ *
+ * É o email que mais reduz chamadas ao suporte. Quem sabe o nome, o
+ * telefone e a matrícula não liga a perguntar se está tudo bem.
+ */
+export async function sendDriverDetails(booking, driver, vehicle) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: `Your driver tomorrow: ${driver.full_name}.`,
+      heading: 'Your driver for tomorrow',
+      intro: `Everything is arranged for your transfer on ${longDate(booking.booking_date)}.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Driver', value: driver.full_name },
+          { label: 'Phone', value: driver.phone },
+          { label: 'Vehicle', value: vehicle
+            ? `${vehicle.make} ${vehicle.model}` : null },
+          { label: 'Plate', value: vehicle ? vehicle.plate : null },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Reference', value: ref }
+        ]},
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { type: 'note', tone: 'ok', html: booking.flight_number
+          ? `<strong>We are tracking flight ${esc(booking.flight_number)}.</strong><br>` +
+            'If it lands late the driver waits, and you are not charged for it.'
+          : '<strong>Your driver will be waiting at the pick-up point.</strong><br>' +
+            'If you cannot find each other, call the number above.' },
+        { html: 'Save this driver&rsquo;s number to your phone now &mdash; it is much easier ' +
+          'than looking for this email while carrying luggage.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: 'See my trip' }
+    });
+
+    return await sendOnce({
+      key: `driver_details:${ref}`,
+      template: 'driver_details',
+      to: booking.passenger_email || booking.email,
+      subject: `Your driver tomorrow — ${driver.full_name}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] driver details build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+// ============================================================
+// PARCEIROS DE MOTORISTAS
+// ============================================================
+
+export async function sendPartnerApplicationReceived(partner) {
+  try {
+    const html = wrap({
+      preheader: 'We have your application and are reviewing it.',
+      heading: 'We have your application',
+      intro: `Thank you, ${esc(partner.contact_name || 'there')}. ` +
+        `${esc(partner.legal_name)} is now in the queue.`,
+      blocks: [
+        { html: 'We check every submission by hand, usually within a few working days. ' +
+          'If a document is wrong or missing we tell you exactly which one and why &mdash; ' +
+          'you will never get a rejection without a reason.' },
+        { type: 'note', tone: 'warn', html:
+          '<strong>You can carry on in the meantime.</strong><br>' +
+          'Add your drivers, vehicles and service airports now, and you will be ready ' +
+          'to take rides the moment we approve you.' }
+      ],
+      cta: { href: 'https://drivers.airportlink.app', label: 'Open my dashboard' }
+    });
+
+    return await sendOnce({
+      key: `partner_received:${partner.id}`,
+      template: 'partner_received',
+      to: partner.email,
+      subject: 'Your Airportlink partner application',
+      html
+    });
+  } catch (error) {
+    console.error('[email] partner received build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/** Verificado, aprovado ou recusado. Um email, três desfechos. */
+export async function sendPartnerDecision(partner, decision, reason) {
+  try {
+    const copy = {
+      verified: {
+        heading: 'Your documents are accepted',
+        intro: 'We have checked your paperwork and everything is in order.',
+        tone: 'ok',
+        note: '<strong>A few steps left before rides reach you.</strong><br>' +
+          'Add a driver, a vehicle, the airports you serve and your payout details. ' +
+          'Your dashboard shows exactly what is missing.',
+        cta: 'Finish setting up',
+        subject: 'Your documents are accepted'
+      },
+      approved: {
+        heading: 'You are live',
+        intro: 'Your company is approved and transfers at your airports are now visible to you.',
+        tone: 'ok',
+        note: '<strong>Take the rides that fit your day.</strong><br>' +
+          'The fee shown on each ride is what reaches your account in full. ' +
+          'We take no commission on top of it.',
+        cta: 'See available rides',
+        subject: 'You are live on Airportlink'
+      },
+      rejected: {
+        heading: 'We cannot approve your application',
+        intro: 'We reviewed your submission and cannot take it forward as it stands.',
+        tone: 'bad',
+        note: reason
+          ? '<strong>Reason</strong><br>' + esc(reason)
+          : '<strong>Reason</strong><br>Please contact us and we will explain.',
+        cta: 'Contact us',
+        subject: 'About your Airportlink application'
+      },
+      suspended: {
+        heading: 'Your account is paused',
+        intro: 'You are not receiving rides at the moment.',
+        tone: 'bad',
+        note: reason
+          ? '<strong>Reason</strong><br>' + esc(reason)
+          : '<strong>Reason</strong><br>Please contact us and we will explain.',
+        cta: 'Open my dashboard',
+        subject: 'Your Airportlink account is paused'
+      }
+    }[decision];
+
+    if (!copy) return { sent: false, reason: 'unknown-decision' };
+
+    const html = wrap({
+      preheader: copy.subject,
+      heading: copy.heading,
+      intro: copy.intro,
+      blocks: [{ type: 'note', tone: copy.tone, html: copy.note }],
+      cta: { href: 'https://drivers.airportlink.app', label: copy.cta }
+    });
+
+    // A chave inclui a decisão: um parceiro passa por verified e
+    // depois por approved, e os dois emails têm de sair.
+    return await sendOnce({
+      key: `partner_${decision}:${partner.id}`,
+      template: `partner_${decision}`,
+      to: partner.email,
+      subject: copy.subject,
+      html
+    });
+  } catch (error) {
+    console.error('[email] partner decision build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/** Uma viagem que o parceiro acabou de aceitar. */
+export async function sendRideConfirmedToPartner(partner, booking) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: `Ride confirmed for ${longDate(booking.booking_date)}.`,
+      heading: 'Ride confirmed',
+      intro: 'This transfer is now yours. Here is everything you need.',
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Reference', value: ref },
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'Flight', value: booking.flight_number },
+          { label: 'You receive', value: money(booking.driver_payout, booking.currency) }
+        ]},
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { type: 'facts', items: [
+          { label: 'Passenger', value: booking.passenger_name || booking.full_name },
+          { label: 'Phone', value: booking.passenger_phone || booking.phone },
+          { label: 'Notes', value: booking.notes }
+        ]},
+        { type: 'note', tone: 'warn', html:
+          '<strong>You can release this ride until 24 hours before pick-up.</strong><br>' +
+          'After that the passenger is counting on you. If something goes wrong, ' +
+          'call us rather than leaving them waiting.' }
+      ],
+      cta: { href: 'https://drivers.airportlink.app', label: 'See my rides' }
+    });
+
+    return await sendOnce({
+      key: `ride_confirmed:${ref}:${partner.id}`,
+      template: 'ride_confirmed',
+      to: partner.email,
+      subject: `Ride confirmed — ${longDate(booking.booking_date)} at ${shortTime(booking.booking_time)}`,
+      html,
+      bookingId: booking.id
+    });
+  } catch (error) {
+    console.error('[email] ride confirmed build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/**
+ * Um documento a expirar.
+ *
+ * A chave inclui a data de validade: quando o documento é
+ * substituído, a data muda e o aviso do seguinte volta a poder sair.
+ */
+export async function sendDocumentExpiring(partner, doc, daysLeft) {
+  try {
+    const expired = daysLeft <= 0;
+
+    const html = wrap({
+      preheader: expired
+        ? 'A document has expired and your rides are paused.'
+        : `${doc.label} expires in ${daysLeft} days.`,
+      heading: expired ? 'Your rides are paused' : 'A document is about to expire',
+      intro: expired
+        ? `${esc(doc.label)} expired on ${longDate(doc.expires_on)}, so we have stopped ` +
+          'sending you rides.'
+        : `${esc(doc.label)} expires on ${longDate(doc.expires_on)}.`,
+      blocks: [
+        { type: 'note', tone: expired ? 'bad' : 'warn', html: expired
+          ? '<strong>Upload the new document and you are back in immediately.</strong><br>' +
+            'Rides you already accepted are not affected &mdash; please still do them.'
+          : '<strong>Upload the new one before that date and nothing changes.</strong><br>' +
+            'If it expires, rides stop reaching you until it is replaced.' }
+      ],
+      cta: { href: 'https://drivers.airportlink.app', label: 'Upload it now' }
+    });
+
+    return await sendOnce({
+      key: `doc_expiry:${doc.id}:${doc.expires_on}:${expired ? 'gone' : daysLeft}`,
+      template: expired ? 'document_expired' : 'document_expiring',
+      to: partner.email,
+      subject: expired
+        ? `Rides paused — ${doc.label} has expired`
+        : `${doc.label} expires in ${daysLeft} days`,
+      html
+    });
+  } catch (error) {
+    console.error('[email] document expiry build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+// ============================================================
+// AGÊNCIAS DE VIAGENS
+// ============================================================
+
+export async function sendAgentDecision(agent, decision, reason) {
+  try {
+    const copy = {
+      approved: {
+        heading: 'Your trade account is open',
+        intro: `${esc(agent.agency_name)} is approved. Your rate is applied automatically ` +
+          'from now on, on every booking you make while signed in.',
+        tone: 'ok',
+        note: `<strong>${esc(agent.commission)}% off every transfer.</strong><br>` +
+          'You also get a longer cancellation window and one statement a month ' +
+          'instead of a card charge per booking.',
+        cta: 'Open my dashboard',
+        subject: 'Your Airportlink trade account is open'
+      },
+      rejected: {
+        heading: 'We cannot open a trade account',
+        intro: 'We reviewed your application and cannot take it forward as it stands.',
+        tone: 'bad',
+        note: reason
+          ? '<strong>Reason</strong><br>' + esc(reason)
+          : '<strong>Reason</strong><br>Please contact us and we will explain.',
+        cta: 'Contact us',
+        subject: 'About your Airportlink trade application'
+      }
+    }[decision];
+
+    if (!copy) return { sent: false, reason: 'unknown-decision' };
+
+    const html = wrap({
+      preheader: copy.subject,
+      heading: copy.heading,
+      intro: copy.intro,
+      blocks: [
+        { type: 'note', tone: copy.tone, html: copy.note },
+        decision === 'approved'
+          ? { html: 'Your travellers deal with the driver directly &mdash; we never contact ' +
+              'your clients about anything except the transfer they are on.' }
+          : { html: '' }
+      ].filter((b) => b.html !== ''),
+      cta: { href: `${SITE}/travelagents`, label: copy.cta }
+    });
+
+    return await sendOnce({
+      key: `agent_${decision}:${agent.id}`,
+      template: `agent_${decision}`,
+      to: agent.email,
+      subject: copy.subject,
+      html
+    });
+  } catch (error) {
+    console.error('[email] agent decision build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
