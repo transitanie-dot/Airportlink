@@ -19,6 +19,9 @@ import {
   sendChargeSucceeded,
   sendChargeFailed,
   sendCancellation,
+  sendDriverDetails,
+  sendAgentDecision,
+  sendDocumentExpiring,
   notifyOps
 } from './emailService.js';
 import { createPartnerRoutes } from './partners.js';
@@ -1380,6 +1383,12 @@ app.post('/api/agent/review', async (req, res) => {
       commission: data.commission
     });
 
+    // O email não pode partir a decisão: a agência já está aprovada
+    // na base de dados quando chegamos aqui.
+    if (decision === 'approved' || decision === 'rejected') {
+      await sendAgentDecision(data, decision, req.body.reason);
+    }
+
     return res.json({ success: true, agent: data });
   } catch (error) {
     console.error('agent/review error:', error);
@@ -1806,6 +1815,137 @@ app.post('/api/tasks/test-email', async (req, res) => {
   console.log('[email] test run:', checks);
 
   return res.json({ to, ...checks });
+});
+
+/**
+ * O correio de todos os dias.
+ *
+ * Uma só chamada trata do que depende do calendário: os detalhes do
+ * motorista na véspera, os documentos a expirar, e o aviso interno
+ * das viagens que ninguém quis.
+ *
+ * Corre uma vez por dia, de manhã. Não de hora a hora: um lembrete
+ * que chega às três da manhã é pior do que nenhum.
+ *
+ * cron-job.org → POST /api/tasks/daily-emails, às 09:15
+ */
+app.post('/api/tasks/daily-emails', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const out = { driver_details: 0, expiring: 0, expired: 0, unclaimed: 0, errors: [] };
+
+  const day = (offset) => {
+    const d = new Date();
+    d.setDate(d.getDate() + offset);
+    return d.toISOString().slice(0, 10);
+  };
+
+  // ---------- 1. o motorista, na véspera ----------
+  try {
+    const { data: rides } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('booking_date', day(1))
+      .not('assigned_partner_id', 'is', null)
+      .neq('status', 'cancelled');
+
+    for (const ride of (rides || [])) {
+      // Um motorista e um veículo do parceiro. Quando houver
+      // atribuição explícita usamos essa; até lá, o primeiro ativo.
+      const [driverRes, vehicleRes] = await Promise.all([
+        supabase.from('drivers').select('*')
+          .eq('partner_id', ride.assigned_partner_id)
+          .eq('status', 'active').limit(1).maybeSingle(),
+        supabase.from('partner_vehicles').select('*')
+          .eq('partner_id', ride.assigned_partner_id)
+          .eq('status', 'active')
+          .gte('seats', ride.passengers || 1)
+          .order('seats').limit(1).maybeSingle()
+      ]);
+
+      if (!driverRes.data) {
+        // Sem motorista não há email — e é um problema real, porque
+        // a viagem é amanhã.
+        await notifyOps('Ride tomorrow with no driver on file', [
+          `Reference: ${ride.booking_reference || ride.booking_id}`,
+          `Route: ${ride.pickup} to ${ride.dropoff}`,
+          `Pick-up: ${ride.booking_date} ${String(ride.booking_time || '').slice(0, 5)}`,
+          'The partner has taken this ride but has no active driver.'
+        ]);
+        continue;
+      }
+
+      const result = await sendDriverDetails(ride, driverRes.data, vehicleRes.data);
+      if (result.sent) out.driver_details += 1;
+    }
+  } catch (error) {
+    out.errors.push('driver_details: ' + error.message);
+  }
+
+  // ---------- 2. documentos a expirar ----------
+  try {
+    const { data: docs } = await supabase
+      .from('compliance_documents')
+      .select('*, driver_partners!inner(id, email, legal_name, status)')
+      .not('expires_on', 'is', null)
+      .lte('expires_on', day(30));
+
+    for (const doc of (docs || [])) {
+      const partner = doc.driver_partners;
+      if (!partner || partner.status === 'rejected') continue;
+
+      const daysLeft = Math.round(
+        (new Date(doc.expires_on).getTime() - Date.now()) / 864e5
+      );
+
+      // Avisamos aos 30, aos 7, e no dia em que expira. Todos os
+      // dias seria assédio; só uma vez seria fácil de perder.
+      if (![30, 7, 1].includes(daysLeft) && daysLeft > 0) continue;
+
+      const result = await sendDocumentExpiring(partner, doc, daysLeft);
+      if (result.sent) {
+        if (daysLeft <= 0) out.expired += 1;
+        else out.expiring += 1;
+      }
+    }
+  } catch (error) {
+    out.errors.push('expiring: ' + error.message);
+  }
+
+  // ---------- 3. viagens que ninguém quis ----------
+  try {
+    const { data: orphans } = await supabase
+      .from('unclaimed_rides')
+      .select('*')
+      .lte('hours_to_pickup', 48);
+
+    if ((orphans || []).length) {
+      out.unclaimed = orphans.length;
+
+      await notifyOps(`${orphans.length} ride(s) with no partner`, [
+        'These are within 48 hours of pick-up and nobody has taken them.',
+        '',
+        ...orphans.map((r) =>
+          `${r.booking_reference || r.booking_id} — ${r.pickup_airport || 'NO AIRPORT'} — ` +
+          `${r.booking_date} ${String(r.booking_time || '').slice(0, 5)} — ` +
+          `${Math.round(r.hours_to_pickup)}h left — ` +
+          `${r.partners_that_can_see_it} partner(s) can see it`),
+        '',
+        'Where the airport is missing, the pick-up text did not match any airport ' +
+        'and the ride cannot reach anyone.'
+      ]);
+    }
+  } catch (error) {
+    out.errors.push('unclaimed: ' + error.message);
+  }
+
+  console.log('[daily-emails]', out);
+  return res.json({ ok: true, ...out });
 });
 
 app.post('/api/tasks/charge-due', async (req, res) => {
