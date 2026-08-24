@@ -305,20 +305,42 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
     return { allowed: true, reason: null, rules };
   }
 
-  if (!Number.isFinite(hours) || hours < rules.min_hours_for_later) {
+  // As razões dizem o número concreto. "Não disponível" sem
+  // explicação parece uma avaria; "a recolha é dentro de 72 horas"
+  // é uma regra que se percebe e que a pessoa pode contornar
+  // escolhendo outra data.
+  if (!Number.isFinite(hours)) {
     return {
       allowed: false,
-      reason: `Pick-up is within ${rules.min_hours_for_later} hours, so this one is paid at booking.`,
+      reason: 'Pick a date and time first.',
+      rules
+    };
+  }
+
+  if (hours < rules.min_hours_for_later) {
+    return {
+      allowed: false,
+      reason: `Pick-up is in about ${Math.round(hours)} hours. Paying later needs at least ` +
+        `${rules.min_hours_for_later} hours' notice, so this one is paid now.`,
       rules
     };
   }
 
   if (Number(priceEUR) > Number(rules.max_value_for_later)) {
-    return { allowed: false, reason: 'Higher-value transfers are paid at booking.', rules };
+    return {
+      allowed: false,
+      reason: 'Transfers above our higher-value threshold are paid at booking.',
+      rules
+    };
   }
 
   if (Number(distanceKm) > Number(rules.max_km_for_later)) {
-    return { allowed: false, reason: 'Long-distance transfers are paid at booking.', rules };
+    return {
+      allowed: false,
+      reason: `This route is about ${Math.round(distanceKm)} km. Journeys over ` +
+        `${rules.max_km_for_later} km are paid at booking.`,
+      rules
+    };
   }
 
   return { allowed: true, reason: null, rules };
@@ -523,8 +545,13 @@ app.post('/api/payment-options', async (req, res) => {
     });
   } catch (error) {
     console.error('payment-options error:', error);
-    // Perante a dúvida, só pagar já. Nunca o contrário.
-    return res.json({ pay_later: false, reason: null, charge_lead_hours: 48 });
+    // Perante a dúvida, só pagar já. Nunca o contrário — mas com
+    // uma explicação, senão o cartão fica cinzento sem motivo.
+    return res.json({
+      pay_later: false,
+      reason: 'We could not check the payment options right now, so this booking is paid at checkout.',
+      charge_lead_hours: 48
+    });
   }
 });
 
