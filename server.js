@@ -1,7 +1,17 @@
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+// O cliente e as funções de identidade vivem no supabaseclient.js.
+// Antes esse ficheiro era um segundo servidor com uma cópia antiga
+// da lógica; agora é o módulo partilhado que o nome sempre prometeu.
+import {
+  supabase,
+  getUserFromRequest,
+  getApprovedAgent,
+  requireAdmin,
+  checkConnection,
+  DEFAULT_AGENT_COMMISSION
+} from './supabaseclient.js';
 import {
   initEmail,
   sendBookingConfirmation,
@@ -23,13 +33,6 @@ if (!process.env.STRIPE_WEBHOOK_SECRET) throw new Error('STRIPE_WEBHOOK_SECRET i
 if (!process.env.GOOGLE_SERVER_API_KEY) throw new Error('GOOGLE_SERVER_API_KEY is required');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-// O serviço de email escreve na email_log para não enviar duas
-// vezes. Precisa do mesmo cliente, não de outro.
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
 initEmail(supabase);
 
 const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
@@ -38,7 +41,6 @@ const FREE_CANCELLATION_HOURS = Number(process.env.FREE_CANCELLATION_HOURS || 24
 // Os agentes têm uma janela mais generosa. É uma das condições do
 // programa de parceria e não custa dinheiro.
 const AGENT_CANCELLATION_HOURS = Number(process.env.AGENT_CANCELLATION_HOURS || 12);
-const DEFAULT_AGENT_COMMISSION = Number(process.env.DEFAULT_AGENT_COMMISSION || 12);
 
 const FX_MARGIN = Number(process.env.FX_MARGIN || 0.02);
 
@@ -396,79 +398,6 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
 // A margem do agente é SEMPRE calculada aqui, a partir do JWT. Se
 // viesse do browser, qualquer pessoa reclamava 12% de desconto.
 // ============================================================
-
-async function getUserFromRequest(req) {
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-
-  if (!token) {
-    return null;
-  }
-
-  const { data, error } = await supabase.auth.getUser(token);
-
-  if (error || !data?.user) {
-    return null;
-  }
-
-  return data.user;
-}
-
-async function getApprovedAgent(user) {
-  if (!user) {
-    return null;
-  }
-
-  // travel_agents é a tabela das AGÊNCIAS. A contacts continua a ser
-  // a das pessoas — o agente tem linha nas duas.
-  const { data, error } = await supabase
-    .from('travel_agents')
-    .select('id, email, contact_name, agency_name, status, commission')
-    .eq('id', user.id)
-    .maybeSingle();
-
-  if (error || !data || data.status !== 'approved') {
-    return null;
-  }
-
-  const pct = Number(data.commission);
-
-  return {
-    ...data,
-    commission: Number.isFinite(pct) && pct > 0 && pct < 100
-      ? pct
-      : DEFAULT_AGENT_COMMISSION
-  };
-}
-
-// Devolve { user } ou { error } — a distinção importa: "não estás
-// autenticado" e "esta conta não é admin" pedem ações diferentes, e
-// no mesmo browser é fácil a sessão ter sido substituída por outra.
-async function requireAdmin(req) {
-  const user = await getUserFromRequest(req);
-
-  if (!user) {
-    return { error: 'Not signed in. Your session may have expired or been replaced.' };
-  }
-
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('id, email, is_admin')
-    .eq('id', user.id)
-    .maybeSingle();
-
-  if (error) {
-    return { error: 'Could not verify your account.' };
-  }
-
-  if (!data || data.is_admin !== true) {
-    return {
-      error: `You are signed in as ${user.email}, which is not an administrator account. ` +
-             'Sign out and sign in with your admin account.'
-    };
-  }
-
-  return { user };
-}
 
 const ALLOWED_ORIGINS = [
   SITE_ORIGIN,
@@ -2018,6 +1947,11 @@ app.post('/api/tasks/charge-due', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
+  // Uma leitura qualquer confirma que a chave é a certa. Mais vale
+  // descobrir aqui do que na primeira reserva, com um cliente à
+  // espera e um "permission denied" no log.
+  await checkConnection();
+
   console.log(`Server running on ${PORT}`);
   await loadExchangeRates();
 });
