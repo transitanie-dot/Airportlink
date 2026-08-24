@@ -250,6 +250,81 @@ async function getDistanceAndDuration(pickup, dropoff) {
 }
 
 // ============================================================
+// RESERVAR AGORA, PAGAR DEPOIS
+//
+// O Stripe não devolve a comissão num reembolso. Guardar o cartão e
+// cobrar 48 horas antes faz com que a maioria dos cancelamentos
+// aconteça antes de haver cobrança nenhuma — e aí não há comissão a
+// perder.
+//
+// As regras vivem na base de dados, não aqui: os limiares vão mudar
+// com o ticket médio e não quero um deploy por causa disso.
+// ============================================================
+
+let rulesCache = { rules: null, at: 0 };
+
+async function getPaymentRules() {
+  if (rulesCache.rules && Date.now() - rulesCache.at < 5 * 60 * 1000) {
+    return rulesCache.rules;
+  }
+
+  const { data } = await supabase.from('payment_rules').select('*').eq('id', 1).maybeSingle();
+
+  const rules = data || {
+    min_hours_for_later: 72,
+    charge_lead_hours: 48,
+    max_value_for_later: 300,
+    max_km_for_later: 150,
+    agents_always_later: true,
+    max_charge_attempts: 3,
+    retry_interval_hours: 8
+  };
+
+  rulesCache = { rules, at: Date.now() };
+  return rules;
+}
+
+function hoursUntil(dateStr, timeStr) {
+  const at = new Date(`${dateStr}T${timeStr || '00:00'}`);
+  if (!Number.isFinite(at.getTime())) return NaN;
+  return (at.getTime() - Date.now()) / 36e5;
+}
+
+/**
+ * Pode esta reserva ser paga depois?
+ *
+ * Devolve sempre o motivo, e não só um sim ou não: o calculador
+ * mostra-o ao cliente, e "não disponível" sem explicação parece uma
+ * avaria.
+ */
+async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isAgent }) {
+  const rules = await getPaymentRules();
+  const hours = hoursUntil(dateStr, timeStr);
+
+  if (isAgent && rules.agents_always_later) {
+    return { allowed: true, reason: null, rules };
+  }
+
+  if (!Number.isFinite(hours) || hours < rules.min_hours_for_later) {
+    return {
+      allowed: false,
+      reason: `Pick-up is within ${rules.min_hours_for_later} hours, so this one is paid at booking.`,
+      rules
+    };
+  }
+
+  if (Number(priceEUR) > Number(rules.max_value_for_later)) {
+    return { allowed: false, reason: 'Higher-value transfers are paid at booking.', rules };
+  }
+
+  if (Number(distanceKm) > Number(rules.max_km_for_later)) {
+    return { allowed: false, reason: 'Long-distance transfers are paid at booking.', rules };
+  }
+
+  return { allowed: true, reason: null, rules };
+}
+
+// ============================================================
 // IDENTIDADE E AGENTES
 //
 // A margem do agente é SEMPRE calculada aqui, a partir do JWT. Se
@@ -410,6 +485,47 @@ app.get('/api/exchange-rates', async (req, res) => {
     source,
     rates: withMargin
   });
+});
+
+// O calculador pergunta aqui se pode mostrar a opção de pagar
+// depois. A decisão é sempre repetida no checkout — isto é só para a
+// interface, e nunca é o que decide se se cobra ou não.
+app.post('/api/payment-options', async (req, res) => {
+  try {
+    const { booking } = req.body || {};
+    if (!booking) return res.status(400).json({ error: 'Missing booking' });
+
+    const requester = await getUserFromRequest(req);
+    const agent = await getApprovedAgent(requester);
+
+    let distanceKm = Number(booking.distance_km) || 0;
+    if (!distanceKm && booking.pickup && booking.dropoff) {
+      try {
+        ({ distanceKm } = await getDistanceAndDuration(booking.pickup, booking.dropoff));
+      } catch (e) {
+        distanceKm = 0;
+      }
+    }
+
+    const result = await payLaterEligibility({
+      dateStr: booking.booking_date || booking.date,
+      timeStr: booking.booking_time || booking.time,
+      priceEUR: booking.price_eur || 0,
+      distanceKm,
+      isAgent: Boolean(agent)
+    });
+
+    return res.json({
+      pay_later: result.allowed,
+      reason: result.reason,
+      charge_lead_hours: result.rules.charge_lead_hours,
+      is_agent: Boolean(agent)
+    });
+  } catch (error) {
+    console.error('payment-options error:', error);
+    // Perante a dúvida, só pagar já. Nunca o contrário.
+    return res.json({ pay_later: false, reason: null, charge_lead_hours: 48 });
+  }
 });
 
 app.post('/register', async (req, res) => {
@@ -578,6 +694,35 @@ app.post('/api/create-checkout-session', async (req, res) => {
       : ''
   };
 
+  // O cliente pediu pagar depois? Só se as regras deixarem. A
+  // decisão é tomada AQUI, não no browser: um pedido forjado com
+  // payment_mode 'later' cai na mesma nesta verificação.
+  const wantsLater = booking.payment_mode === 'later';
+  const eligibility = await payLaterEligibility({
+    dateStr: metadata.booking_date,
+    timeStr: metadata.booking_time,
+    priceEUR,
+    distanceKm,
+    isAgent: Boolean(agent)
+  });
+
+  const payLater = wantsLater && eligibility.allowed;
+
+  if (wantsLater && !eligibility.allowed) {
+    return res.status(400).json({
+      error: eligibility.reason || 'This booking has to be paid at checkout.'
+    });
+  }
+
+  metadata.payment_mode = payLater ? 'later' : 'now';
+
+  if (payLater) {
+    const pickupAt = new Date(`${metadata.booking_date}T${metadata.booking_time || '00:00'}`);
+    metadata.charge_at = new Date(
+      pickupAt.getTime() - eligibility.rules.charge_lead_hours * 36e5
+    ).toISOString();
+  }
+
   try {
     const parts = [
       `${passengers} passengers`,
@@ -589,30 +734,49 @@ app.post('/api/create-checkout-session', async (req, res) => {
       parts.push(`Flight ${metadata.flight_number}`);
     }
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      mode: 'payment',
-      line_items: [{
-        price_data: {
-          currency: currency.toLowerCase(),
-          product_data: {
-            name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
-            description: parts.join(', ')
+    let session;
+
+    if (payLater) {
+      // mode 'setup' guarda o cartão sem cobrar nada. O cliente vê a
+      // página do Stripe, autentica o cartão se o banco exigir, e não
+      // sai dinheiro nenhum da conta dele hoje.
+      session = await stripe.checkout.sessions.create({
+        mode: 'setup',
+        payment_method_types: ['card'],
+        customer_email: booking.email,
+        success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${SITE_ORIGIN}/?cancel=true`,
+        metadata,
+        setup_intent_data: { metadata }
+      });
+    } else {
+      session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        mode: 'payment',
+        line_items: [{
+          price_data: {
+            currency: currency.toLowerCase(),
+            product_data: {
+              name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
+              description: parts.join(', ')
+            },
+            unit_amount: amount
           },
-          unit_amount: amount
-        },
-        quantity: 1
-      }],
-      success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${SITE_ORIGIN}/?cancel=true`,
-      customer_email: booking.email,
-      metadata,
-      payment_intent_data: { metadata }
-    });
+          quantity: 1
+        }],
+        success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${SITE_ORIGIN}/?cancel=true`,
+        customer_email: booking.email,
+        metadata,
+        payment_intent_data: { metadata }
+      });
+    }
 
     return res.json({
       url: session.url,
       sessionId: session.id,
+      payment_mode: payLater ? 'later' : 'now',
+      charge_at: metadata.charge_at || null,
       agent: agent
         ? { commission, agency_name: agent.agency_name }
         : null
@@ -715,18 +879,54 @@ app.post('/api/cancel-booking', async (req, res) => {
 
     const hoursUntil = (pickupAt.getTime() - Date.now()) / 36e5;
 
+    if (!Number.isFinite(hoursUntil)) {
+      return res.status(400).json({
+        error: 'This booking has no valid pick-up time. Please contact support.'
+      });
+    }
+
+    // Reserva com pagamento adiado e ainda por cobrar: cancela-se sem
+    // mais nada. Não há dinheiro a devolver, nem comissão a perder —
+    // é exatamente para isto que o pagar depois existe.
+    const notYetCharged = booking.payment_mode === 'later' && !booking.charged_at;
+
+    if (notYetCharged) {
+      const { error: cancelError } = await supabase.from('bookings').update({
+        status: 'cancelled',
+        payment_status: 'cancelled_before_charge',
+        charge_at: null,
+        assigned_partner_id: null,
+        assigned_driver_id: null,
+        assigned_vehicle_id: null,
+        assigned_at: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      if (cancelError) {
+        console.error('Cancel (uncharged) error:', cancelError);
+        return res.status(500).json({ error: 'Could not cancel. Please contact support.' });
+      }
+
+      // O cartão guardado deixa de fazer falta. Apagá-lo do Stripe é
+      // o mínimo: guardar cartões de reservas canceladas é risco sem
+      // proveito nenhum.
+      if (booking.stripe_payment_method_id) {
+        try {
+          await stripe.paymentMethods.detach(booking.stripe_payment_method_id);
+        } catch (error) {
+          console.warn('Could not detach card:', error.message);
+        }
+      }
+
+      return res.json({ success: true, refunded: false, charged: false });
+    }
+
     // Agentes têm 12 horas em vez de 24, mas só nas reservas que
     // eles próprios fizeram.
     const agent = await getApprovedAgent(user);
     const windowHours = (agent && booking.booked_by === user.id)
       ? AGENT_CANCELLATION_HOURS
       : FREE_CANCELLATION_HOURS;
-
-    if (!Number.isFinite(hoursUntil)) {
-      return res.status(400).json({
-        error: 'This booking has no valid pick-up time. Please contact support.'
-      });
-    }
 
     if (hoursUntil < windowHours) {
       return res.status(400).json({
@@ -1327,6 +1527,25 @@ app.post('/api/stripe-webhook', async (req, res) => {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const metadata = session.metadata || {};
+    const payLater = metadata.payment_mode === 'later' || session.mode === 'setup';
+
+    // Em modo setup não há cobrança: o que interessa é o cartão que
+    // ficou guardado, para o podermos usar mais tarde sem o cliente
+    // estar presente.
+    let savedPaymentMethod = null;
+    let setupIntentId = null;
+
+    if (payLater && typeof session.setup_intent === 'string') {
+      try {
+        const si = await stripe.setupIntents.retrieve(session.setup_intent);
+        setupIntentId = si.id;
+        savedPaymentMethod = typeof si.payment_method === 'string'
+          ? si.payment_method
+          : si.payment_method?.id || null;
+      } catch (error) {
+        console.error('SetupIntent retrieve error:', error);
+      }
+    }
 
     let charge = null;
 
@@ -1395,9 +1614,13 @@ app.post('/api/stripe-webhook', async (req, res) => {
       preferred_languages: metadata.preferred_languages
         ? metadata.preferred_languages.split(',').filter(Boolean)
         : null,
-      status: metadata.status || session.payment_status || 'paid',
-      payment_status: session.payment_status || null,
-      amount_total: session.amount_total || null,
+      status: payLater ? 'confirmed' : (metadata.status || session.payment_status || 'paid'),
+      payment_status: payLater ? 'card_saved' : (session.payment_status || null),
+      payment_mode: payLater ? 'later' : 'now',
+      charge_at: payLater ? (metadata.charge_at || null) : null,
+      stripe_payment_method_id: savedPaymentMethod,
+      stripe_setup_intent_id: setupIntentId,
+      amount_total: payLater ? null : (session.amount_total || null),
       stripe_customer_id: typeof session.customer === 'string'
         ? session.customer
         : null,
@@ -1453,6 +1676,139 @@ app.post('/api/stripe-webhook', async (req, res) => {
   }
 
   return res.json({ received: true });
+});
+
+// ============================================================
+// COBRANÇA AGENDADA
+//
+// Chamado de hora a hora por um cron externo. Não é uma rota pública:
+// exige um segredo no cabeçalho, senão qualquer pessoa disparava
+// cobranças no teu Stripe.
+//
+// cron-job.org → POST https://airportlink.onrender.com/api/tasks/charge-due
+//                cabeçalho: x-cron-secret: <CRON_SECRET>
+// ============================================================
+app.post('/api/tasks/charge-due', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    console.warn('charge-due called with a bad secret');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const rules = await getPaymentRules();
+  const results = { checked: 0, charged: 0, failed: 0, abandoned: 0, skipped: 0 };
+
+  try {
+    const { data: due, error } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('payment_mode', 'later')
+      .is('charged_at', null)
+      .neq('status', 'cancelled')
+      .lte('charge_at', new Date().toISOString())
+      .lt('charge_attempts', rules.max_charge_attempts)
+      .limit(50);
+
+    if (error) throw error;
+
+    for (const booking of (due || [])) {
+      results.checked += 1;
+
+      // Uma tentativa falhada volta a ser elegível só depois do
+      // intervalo. Sem isto, o cron de hora a hora queimava as três
+      // tentativas em três horas.
+      if (booking.charge_attempts > 0 && booking.updated_at) {
+        const since = (Date.now() - new Date(booking.updated_at).getTime()) / 36e5;
+        if (since < rules.retry_interval_hours) {
+          results.skipped += 1;
+          continue;
+        }
+      }
+
+      if (!booking.stripe_payment_method_id || !booking.stripe_customer_id) {
+        results.skipped += 1;
+        continue;
+      }
+
+      const attemptNo = (booking.charge_attempts || 0) + 1;
+      const currency = booking.currency || 'EUR';
+      const amount = toStripeAmount(Number(booking.price || 0), currency);
+
+      try {
+        const intent = await stripe.paymentIntents.create({
+          amount,
+          currency: currency.toLowerCase(),
+          customer: booking.stripe_customer_id,
+          payment_method: booking.stripe_payment_method_id,
+          // off_session: o cliente não está no site. O banco pode
+          // recusar por isso mesmo, e é esse o caso que tratamos abaixo.
+          off_session: true,
+          confirm: true,
+          metadata: {
+            booking_id: String(booking.booking_id || booking.id),
+            scheduled_charge: 'true'
+          }
+        });
+
+        await supabase.from('bookings').update({
+          charged_at: new Date().toISOString(),
+          charge_attempts: attemptNo,
+          payment_status: 'paid',
+          status: 'paid',
+          amount_total: intent.amount,
+          stripe_payment_intent_id: intent.id,
+          last_charge_error: null,
+          updated_at: new Date().toISOString()
+        }).eq('id', booking.id);
+
+        await supabase.from('charge_attempts').insert({
+          booking_id: booking.id, attempt_no: attemptNo, outcome: 'succeeded',
+          amount: Number(booking.price || 0), currency, stripe_id: intent.id
+        });
+
+        results.charged += 1;
+        console.log('Scheduled charge succeeded:', booking.booking_id || booking.id);
+      } catch (error) {
+        const code = error.code || error.decline_code || 'unknown';
+        const needsCustomer = code === 'authentication_required';
+        const giveUp = attemptNo >= rules.max_charge_attempts;
+
+        await supabase.from('charge_attempts').insert({
+          booking_id: booking.id, attempt_no: attemptNo,
+          outcome: needsCustomer ? 'requires_action' : 'failed',
+          amount: Number(booking.price || 0), currency,
+          error_code: code, error_message: error.message
+        });
+
+        await supabase.from('bookings').update({
+          charge_attempts: attemptNo,
+          last_charge_error: `${code}: ${error.message}`,
+          payment_status: giveUp ? 'charge_abandoned' : 'charge_failed',
+          // Desistir cancela a reserva: manter uma viagem por pagar
+          // significa mandar um motorista a um serviço que ninguém
+          // pagou. Melhor libertá-lo com antecedência.
+          status: giveUp ? 'cancelled' : booking.status,
+          assigned_partner_id: giveUp ? null : booking.assigned_partner_id,
+          updated_at: new Date().toISOString()
+        }).eq('id', booking.id);
+
+        if (giveUp) {
+          results.abandoned += 1;
+          console.error('Charge abandoned, booking cancelled:', booking.booking_id || booking.id, code);
+        } else {
+          results.failed += 1;
+          console.warn('Charge failed, will retry:', booking.booking_id || booking.id, code);
+        }
+      }
+    }
+
+    return res.json({ ok: true, ...results });
+  } catch (error) {
+    console.error('charge-due error:', error);
+    return res.status(500).json({ error: 'Charge run failed.', ...results });
+  }
 });
 
 app.listen(PORT, async () => {
