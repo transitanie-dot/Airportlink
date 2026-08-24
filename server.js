@@ -1817,6 +1817,65 @@ app.post('/api/stripe-webhook', async (req, res) => {
 // cron-job.org → POST https://airportlink.onrender.com/api/tasks/charge-due
 //                cabeçalho: x-cron-secret: <CRON_SECRET>
 // ============================================================
+/**
+ * Testar o email sem fazer uma reserva.
+ *
+ * Existe porque diagnosticar "não recebi nada" através de uma
+ * reserva real mistura três coisas que podem falhar: o Stripe, o
+ * webhook e o email. Isto testa só a última.
+ *
+ * Protegido pelo mesmo segredo do cron: não é uma rota pública.
+ */
+app.post('/api/tasks/test-email', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
+  if (!to) {
+    return res.status(400).json({ error: 'Send { "to": "you@example.com" } or set EMAIL_OPERATIONS.' });
+  }
+
+  const checks = {
+    resend_key: Boolean(process.env.RESEND_API_KEY),
+    from: process.env.EMAIL_FROM_BOOKINGS || process.env.EMAIL_FROM || '(default)',
+    reply_to: process.env.EMAIL_REPLY_TO || '(default)',
+    email_log_table: null,
+    delivered: false,
+    error: null
+  };
+
+  // A email_log existe? É a causa mais provável de nada sair: sem a
+  // tabela, o registo falha e o envio é abandonado antes de começar.
+  try {
+    const { error } = await supabase.from('email_log').select('id').limit(1);
+    checks.email_log_table = error ? `MISSING — ${error.message}` : 'ok';
+  } catch (error) {
+    checks.email_log_table = `MISSING — ${error.message}`;
+  }
+
+  // Envio direto, sem passar pelo registo: queremos saber se o
+  // Resend aceita, separado de tudo o resto.
+  try {
+    const result = await notifyOps('Test email', [
+      'If you are reading this, Resend is working.',
+      `Sent at ${new Date().toISOString()}`,
+      `From: ${checks.from}`
+    ], to);
+    checks.delivered = result.sent;
+    if (!result.sent) checks.error = result.reason || 'unknown';
+  } catch (error) {
+    checks.error = error.message;
+  }
+
+  console.log('[email] test run:', checks);
+
+  return res.json({ to, ...checks });
+});
+
 app.post('/api/tasks/charge-due', async (req, res) => {
   if (!process.env.CRON_SECRET) {
     return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
