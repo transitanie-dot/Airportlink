@@ -223,6 +223,38 @@ async function findPickupAirport(pickupText) {
   return { iata: null, city: null };
 }
 
+/**
+ * O país, a partir do texto da morada. O Google devolve o país no
+ * fim da descrição, por isso olhamos para a última parte.
+ *
+ * Deliberadamente simples: serve para distinguir uma viagem interna
+ * de uma transfronteiriça, que é a distinção que os regimes fiscais
+ * fazem. Não serve para determinar imposto sozinho.
+ */
+const COUNTRY_NAMES = {
+  'portugal': 'PT', 'spain': 'ES', 'españa': 'ES', 'france': 'FR', 'italy': 'IT',
+  'italia': 'IT', 'germany': 'DE', 'deutschland': 'DE', 'netherlands': 'NL',
+  'belgium': 'BE', 'united kingdom': 'GB', 'uk': 'GB', 'england': 'GB',
+  'scotland': 'GB', 'wales': 'GB', 'ireland': 'IE', 'switzerland': 'CH',
+  'austria': 'AT', 'greece': 'GR', 'croatia': 'HR', 'poland': 'PL',
+  'czechia': 'CZ', 'czech republic': 'CZ', 'hungary': 'HU', 'denmark': 'DK',
+  'sweden': 'SE', 'norway': 'NO', 'finland': 'FI', 'iceland': 'IS',
+  'luxembourg': 'LU', 'malta': 'MT', 'cyprus': 'CY', 'turkey': 'TR',
+  'morocco': 'MA', 'united states': 'US', 'usa': 'US', 'canada': 'CA',
+  'mexico': 'MX', 'brazil': 'BR', 'brasil': 'BR'
+};
+
+function guessCountry(text) {
+  const value = String(text || '').toLowerCase();
+  if (!value) return null;
+
+  const tail = value.split(',').pop().trim();
+  if (COUNTRY_NAMES[tail]) return COUNTRY_NAMES[tail];
+
+  const found = Object.keys(COUNTRY_NAMES).find((name) => value.includes(name));
+  return found ? COUNTRY_NAMES[found] : null;
+}
+
 async function getDistanceAndDuration(pickup, dropoff) {
   const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
 
@@ -682,6 +714,18 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   const pickupAirport = await findPickupAirport(booking.pickup);
 
+  // A taxa fica registada na reserva. Converter mais tarde com a taxa
+  // do dia em que se lê o relatório dava números diferentes a cada
+  // consulta, e nenhum deles seria o que realmente aconteceu.
+  // País de recolha e de destino, a partir do texto. Grosseiro mas
+  // suficiente: serve para separar viagens internas de transfronteiriças,
+  // que é a distinção que quase todos os regimes fazem.
+  const countryFrom = guessCountry(booking.pickup);
+  const countryTo = guessCountry(booking.dropoff);
+
+  const rateData = await loadExchangeRates();
+  const fxRate = Number((rateData.rates || {})[String(currency).toUpperCase()] || 1);
+
   const phoneCode = booking.phone_code || booking.phoneCode || '';
   const phoneNumber = booking.phone_number || booking.phoneNumber || '';
 
@@ -711,6 +755,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
     booked_by: agent ? agent.id : '',
     agent_commission_pct: agent ? String(commission) : '',
     agent_gross_price: agent ? String(grossInCurrency.toFixed(2)) : '',
+    price_eur: String(priceEUR.toFixed(2)),
+    fx_rate: String(fxRate),
+    country_from: countryFrom || '',
+    country_to: countryTo || '',
     passenger_name: booking.passenger_name || '',
     passenger_email: booking.passenger_email || '',
     passenger_phone: booking.passenger_phone || '',
@@ -988,6 +1036,11 @@ app.post('/api/cancel-booking', async (req, res) => {
         status: 'cancelled',
         payment_status: refundId ? 'refunded' : booking.payment_status,
         refunded_amount: refundId ? Number(booking.price || 0) : booking.refunded_amount,
+        // Também em euros: sem isto o relatório mensal não sabe
+        // quanto foi devolvido numa reserva feita em libras.
+        refunded_amount_eur: refundId && booking.fx_rate
+          ? Number((Number(booking.price || 0) / Number(booking.fx_rate)).toFixed(2))
+          : booking.refunded_amount_eur,
         refunded_at: refundId ? new Date().toISOString() : booking.refunded_at,
         refund_reason: refundId ? 'Cancelled by customer within the free window' : booking.refund_reason,
         updated_at: new Date().toISOString()
@@ -1123,6 +1176,9 @@ app.post('/api/admin/refund', async (req, res) => {
 
     const update = {
       refunded_amount: totalRefunded,
+      refunded_amount_eur: booking.fx_rate
+        ? Number((totalRefunded / Number(booking.fx_rate)).toFixed(2))
+        : totalRefunded,
       refunded_at: new Date().toISOString(),
       refunded_by: admin.id,
       refund_reason: reason || null,
@@ -1576,14 +1632,35 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
     let charge = null;
 
+    // O que o Stripe depositou, em euros, já líquido de comissão.
+    // O price_eur é o valor cotado à taxa do BCE; este é o que
+    // aparece no extrato. Os dois têm de existir: um para reportar
+    // receita, outro para bater com o banco.
+    let settlement = { eur: null, fee: null, rate: null, id: null };
+
     if (typeof session.payment_intent === 'string') {
       try {
+        // Expandimos até ao balance_transaction numa só chamada: é
+        // aí que está o valor líquido em euros e a comissão.
         const paymentIntent = await stripe.paymentIntents.retrieve(
           session.payment_intent,
-          { expand: ['latest_charge'] }
+          { expand: ['latest_charge.balance_transaction'] }
         );
 
         charge = paymentIntent.latest_charge || null;
+
+        const bt = charge && charge.balance_transaction;
+        if (bt && typeof bt === 'object') {
+          const factor = ZERO_DECIMAL_CURRENCIES
+            .includes(String(bt.currency).toUpperCase()) ? 1 : 100;
+
+          settlement = {
+            eur: Number((bt.net / factor).toFixed(2)),
+            fee: Number((bt.fee / factor).toFixed(2)),
+            rate: bt.exchange_rate || null,
+            id: bt.id
+          };
+        }
       } catch (error) {
         console.error('PaymentIntent retrieve error:', error);
       }
@@ -1638,6 +1715,19 @@ app.post('/api/stripe-webhook', async (req, res) => {
       passenger_phone: metadata.passenger_phone || null,
       pickup_airport: metadata.pickup_airport || null,
       pickup_city: metadata.pickup_city || null,
+      country_from: metadata.country_from || null,
+      country_to: metadata.country_to || null,
+      // Onde a viagem acontece decide, em vários regimes fiscais,
+      // onde o imposto é devido. Guardamos mesmo antes de usar.
+      cross_border: Boolean(metadata.country_from && metadata.country_to &&
+        metadata.country_from !== metadata.country_to),
+      price_eur: metadata.price_eur ? Number(metadata.price_eur) : null,
+      fx_rate: metadata.fx_rate ? Number(metadata.fx_rate) : null,
+      fx_rate_at: new Date().toISOString(),
+      settled_eur: settlement.eur,
+      stripe_fee_eur: settlement.fee,
+      stripe_fx_rate: settlement.rate,
+      balance_transaction_id: settlement.id,
       preferred_languages: metadata.preferred_languages
         ? metadata.preferred_languages.split(',').filter(Boolean)
         : null,
