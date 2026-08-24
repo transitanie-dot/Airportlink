@@ -22,9 +22,51 @@
 
 const RESEND_URL = 'https://api.resend.com/emails';
 
-const FROM = process.env.EMAIL_FROM || 'Airportlink <bookings@airportlink.app>';
+/**
+ * O remetente.
+ *
+ * Aceita os dois nomes porque o servidor já usa EMAIL_FROM_BOOKINGS,
+ * e esse é o melhor nome: deixa espaço para um EMAIL_FROM_PARTNERS
+ * quando os motoristas tiverem os seus próprios emails, sem que os
+ * dois se confundam.
+ *
+ * O domínio TEM de ser mail.airportlink.app — é esse que está
+ * verificado no Resend. Enviar da raiz falha, porque a raiz não tem
+ * os registos de autenticação.
+ */
+const FROM = process.env.EMAIL_FROM_BOOKINGS
+  || process.env.EMAIL_FROM
+  || 'Airportlink <bookings@mail.airportlink.app>';
+
 const REPLY_TO = process.env.EMAIL_REPLY_TO || 'support@airportlink.app';
 const SITE = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
+
+// Para onde vão os avisos internos: viagem sem parceiro, cobrança
+// falhada em definitivo, candidatura nova.
+const OPS = process.env.EMAIL_OPERATIONS || null;
+
+/**
+ * Um aviso para dentro de casa. Não tem chave de idempotência porque
+ * não é para o cliente: se chegarem dois avisos de que uma viagem
+ * não tem motorista, ninguém se incomoda. Perder um é que era mau.
+ */
+export async function notifyOps(subject, lines) {
+  if (!OPS) return { sent: false, reason: 'no-ops-address' };
+
+  try {
+    const html = wrap({
+      preheader: subject,
+      heading: subject,
+      blocks: [{ html: lines.map((l) => esc(l)).join('<br>') }]
+    });
+
+    await deliver({ to: OPS, subject: `[ops] ${subject}`, html });
+    return { sent: true };
+  } catch (error) {
+    console.error('[email] ops notice failed:', error.message);
+    return { sent: false };
+  }
+}
 
 let supabase = null;
 
