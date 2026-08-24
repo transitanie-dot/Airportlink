@@ -25,6 +25,17 @@ export function createPartnerRoutes({
 
   const router = Router();
 
+  /**
+   * Os requisitos do país do parceiro. Se ainda não tivermos uma
+   * lista para esse país, devolvemos a genérica ('GEN') em vez de
+   * nada — um parceiro em Itália tem de conseguir candidatar-se
+   * antes de nós termos mapeado a legislação italiana.
+   */
+  function requirementsFor(all, country) {
+    const local = all.filter((r) => r.country === country);
+    return local.length ? local : all.filter((r) => r.country === 'GEN');
+  }
+
   // ============================================================
   // REDE DE PARCEIROS DE MOTORISTAS
   //
@@ -55,17 +66,121 @@ export function createPartnerRoutes({
         supabase.from('partner_compliance').select('*').eq('partner_id', userId).maybeSingle()
       ]);
 
+    const country = partner.data?.country || DEFAULT_COUNTRY;
+    const allRequirements = requirements.data || [];
+
     return {
       partner: partner.data || null,
       zones: (zones.data || []).map((z) => z.zone_code),
       drivers: drivers.data || [],
       vehicles: vehicles.data || [],
       documents: documents.data || [],
-      requirements: requirements.data || [],
+      requirements: requirementsFor(allRequirements, country),
       serviceZones: allZones.data || [],
       compliance: compliance.data || null
     };
   }
+
+  /**
+   * Registo completo: conta e empresa numa só chamada.
+   *
+   * Feito assim porque o questionário recolhe tudo antes de existir
+   * sessão. Se fossem duas chamadas, um erro na segunda deixava uma
+   * conta órfã sem empresa — e a pessoa não conseguia recomeçar nem
+   * continuar.
+   */
+  router.post('/api/partner/signup', async (req, res) => {
+    const b = req.body || {};
+    let createdUserId = null;
+
+    try {
+      if (!b.email || !b.password) {
+        return res.status(400).json({ error: 'Email and password are required.' });
+      }
+      if (String(b.password).length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+      }
+      if (!b.legal_name || !b.contact_name || !b.contact_phone || !b.country) {
+        return res.status(400).json({
+          error: 'Company name, contact name, phone and country are required.'
+        });
+      }
+
+      const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+        email: b.email,
+        password: b.password,
+        email_confirm: true,
+        user_metadata: { full_name: b.contact_name, partner: true }
+      });
+
+      if (authError || !authData?.user) {
+        return res.status(400).json({
+          error: authError?.message || 'Could not create the account.'
+        });
+      }
+
+      createdUserId = authData.user.id;
+
+      await supabase.from('contacts').upsert({
+        id: createdUserId,
+        email: b.email,
+        full_name: b.contact_name,
+        phone_number: b.contact_phone,
+        is_admin: false
+      }, { onConflict: 'email' });
+
+      const cities = Array.isArray(b.operating_cities)
+        ? b.operating_cities.map((c) => String(c).trim()).filter(Boolean).slice(0, 40)
+        : null;
+
+      const fleetSize = parseInt(b.fleet_size, 10);
+
+      const { error: partnerError } = await supabase.from('driver_partners').insert({
+        id: createdUserId,
+        email: b.email,
+        legal_name: b.legal_name,
+        trading_name: b.trading_name || null,
+        vat_number: b.vat_number || '',
+        country: b.country,
+        registered_address: b.registered_address || null,
+        city: b.city || null,
+        postal_code: b.postal_code || null,
+        contact_name: b.contact_name,
+        contact_role: b.contact_role || null,
+        contact_phone: b.contact_phone,
+        emergency_phone: b.emergency_phone || null,
+        operating_cities: cities && cities.length ? cities : null,
+        fleet_size: Number.isFinite(fleetSize) ? fleetSize : null,
+        owner_drives: typeof b.owner_drives === 'boolean' ? b.owner_drives : null,
+        heard_from: b.heard_from || null,
+        status: 'draft'
+      });
+
+      if (partnerError) throw partnerError;
+
+      console.log('Partner signed up:', { email: b.email, country: b.country });
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('partner/signup error:', error);
+
+      // Se a empresa falhou depois de a conta existir, desfazemos a
+      // conta. Caso contrário a pessoa fica com um email registado
+      // que não consegue usar nem reutilizar.
+      if (createdUserId) {
+        try {
+          await supabase.auth.admin.deleteUser(createdUserId);
+          console.log('Rolled back orphan account for', b.email);
+        } catch (cleanupError) {
+          console.error('Could not roll back account:', cleanupError.message);
+        }
+      }
+
+      return res.status(500).json({
+        error: 'Could not complete your registration. Please try again.'
+      });
+    }
+  });
 
   router.get('/api/partner/me', async (req, res) => {
     try {
@@ -325,11 +440,8 @@ export function createPartnerRoutes({
         missing.push('the partner agreement');
       }
 
-      const country = state.partner.country || DEFAULT_COUNTRY;
-
       state.requirements
-        .filter((r) => r.mandatory && r.country === country &&
-                       r.scope === 'company' && r.stage === 'signup')
+        .filter((r) => r.mandatory && r.scope === 'company' && r.stage === 'signup')
         .forEach((r) => {
           const has = state.documents.some((d) =>
             d.requirement_code === r.code && !d.driver_id && !d.vehicle_id);
