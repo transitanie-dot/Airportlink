@@ -2,7 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
-import { sendBookingConfirmation } from './emailService.js';
+import {
+  initEmail,
+  sendBookingConfirmation,
+  sendCardSaved,
+  sendChargeSucceeded,
+  sendChargeFailed,
+  sendCancellation
+} from './emailService.js';
 import { createPartnerRoutes } from './partners.js';
 
 const app = express();
@@ -15,10 +22,14 @@ if (!process.env.STRIPE_WEBHOOK_SECRET) throw new Error('STRIPE_WEBHOOK_SECRET i
 if (!process.env.GOOGLE_SERVER_API_KEY) throw new Error('GOOGLE_SERVER_API_KEY is required');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// O serviço de email escreve na email_log para não enviar duas
+// vezes. Precisa do mesmo cliente, não de outro.
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+initEmail(supabase);
 
 const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
 const FREE_CANCELLATION_HOURS = Number(process.env.FREE_CANCELLATION_HOURS || 24);
@@ -997,6 +1008,8 @@ app.post('/api/cancel-booking', async (req, res) => {
         }
       }
 
+      await sendCancellation(booking, { refunded: false, amount: 0 });
+
       return res.json({ success: true, refunded: false, charged: false });
     }
 
@@ -1060,6 +1073,11 @@ app.post('/api/cancel-booking', async (req, res) => {
           'Please contact support.'
       });
     }
+
+    await sendCancellation(booking, {
+      refunded: Boolean(refundId),
+      amount: Number(booking.price || 0)
+    });
 
     return res.json({
       success: true,
@@ -1775,25 +1793,13 @@ app.post('/api/stripe-webhook', async (req, res) => {
       );
     }
 
-    const recipientEmail = savedBooking.email || bookingRow.email;
-
-    try {
-      const emailResult = await sendBookingConfirmation({
-        to: recipientEmail,
-        booking: savedBooking
-      });
-
-      console.log('Booking confirmation email sent:', {
-        bookingId: savedBooking.id,
-        recipientEmail,
-        resendId: emailResult?.id || null
-      });
-    } catch (emailError) {
-      console.error('Booking confirmation email failed:', {
-        bookingId: savedBooking.id,
-        recipientEmail,
-        error: emailError.message
-      });
+    // Dois emails diferentes: quem pagou já recebe a confirmação,
+    // quem só guardou o cartão recebe a data em que será cobrado.
+    // Mandar a mesma coisa aos dois faria alguém pensar que já pagou.
+    if (payLater) {
+      await sendCardSaved(savedBooking, bookingRow.charge_at);
+    } else {
+      await sendBookingConfirmation(savedBooking);
     }
   }
 
@@ -1892,6 +1898,7 @@ app.post('/api/tasks/charge-due', async (req, res) => {
 
         results.charged += 1;
         console.log('Scheduled charge succeeded:', booking.booking_id || booking.id);
+        await sendChargeSucceeded(booking);
       } catch (error) {
         const code = error.code || error.decline_code || 'unknown';
         const needsCustomer = code === 'authentication_required';
@@ -1915,6 +1922,8 @@ app.post('/api/tasks/charge-due', async (req, res) => {
           assigned_partner_id: giveUp ? null : booking.assigned_partner_id,
           updated_at: new Date().toISOString()
         }).eq('id', booking.id);
+
+        await sendChargeFailed(booking, { attempt: attemptNo, willRetry: !giveUp });
 
         if (giveUp) {
           results.abandoned += 1;
