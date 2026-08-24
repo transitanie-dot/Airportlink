@@ -759,6 +759,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
     fx_rate: String(fxRate),
     country_from: countryFrom || '',
     country_to: countryTo || '',
+    // Só faz sentido numa reserva de agência, e só o servidor sabe
+    // se quem reserva é mesmo uma. Vem do JWT, não do que o browser
+    // diz que é.
+    agent_reference: agent ? String(booking.agent_reference || '').slice(0, 60) : '',
     passenger_name: booking.passenger_name || '',
     passenger_email: booking.passenger_email || '',
     passenger_phone: booking.passenger_phone || '',
@@ -1713,6 +1717,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
       passenger_name: metadata.passenger_name || null,
       passenger_email: metadata.passenger_email || null,
       passenger_phone: metadata.passenger_phone || null,
+      agent_reference: metadata.agent_reference || null,
       pickup_airport: metadata.pickup_airport || null,
       pickup_city: metadata.pickup_city || null,
       country_from: metadata.country_from || null,
