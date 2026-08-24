@@ -433,7 +433,10 @@ app.use(cors({
     return callback(new Error('Origin not allowed'));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature']
+  // O x-cron-secret está aqui só para as rotas de diagnóstico
+  // poderem ser chamadas do browser. Não abre nada: sem o valor
+  // certo, a rota responde 403 na mesma.
+  allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature', 'x-cron-secret']
 }));
 
 app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
