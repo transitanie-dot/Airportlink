@@ -347,24 +347,63 @@ function reference(booking) {
 // ============================================================
 
 /** Pago na reserva. O mais importante de todos. */
-export async function sendBookingConfirmation(booking, passwordLink) {
+export async function sendBookingConfirmation(booking, passwordLink, returnLeg) {
   try {
     const ref = reference(booking);
 
     const html = wrap({
       preheader: `Your transfer on ${longDate(booking.booking_date)} is confirmed.`,
-      heading: 'Your transfer is confirmed',
-      intro: `Everything is booked, ${esc(booking.full_name || 'there')}. Here is what will happen.`,
+      heading: returnLeg ? 'Both transfers are confirmed' : 'Your transfer is confirmed',
+      intro: returnLeg
+        ? `Everything is booked, ${esc(booking.full_name || 'there')}. Two transfers, ` +
+          'each with its own driver and its own confirmation.'
+        : `Everything is booked, ${esc(booking.full_name || 'there')}. Here is what will happen.`,
       blocks: [
+        returnLeg
+          ? { html: '<strong style="color:#0F766E;font-size:11px;letter-spacing:.1em;' +
+              'text-transform:uppercase">Outbound</strong>' }
+          : { html: '' },
+
         { type: 'facts', items: [
           { label: 'Reference', value: ref },
           { label: 'Date', value: longDate(booking.booking_date) },
           { label: 'Pick-up time', value: shortTime(booking.booking_time) },
           { label: 'Passengers', value: booking.passengers },
           { label: 'Flight', value: booking.flight_number },
-          { label: 'Paid', value: money(booking.price, booking.currency) }
+          { label: returnLeg ? 'This leg' : 'Paid',
+            value: money(booking.price, booking.currency) }
         ]},
         { type: 'route', from: booking.pickup, to: booking.dropoff },
+
+        // A volta é uma reserva própria: referência própria, motorista
+        // próprio, cancelável sozinha. Mostrá-la como um bloco à parte
+        // é o que faz isso ficar claro.
+        returnLeg
+          ? { html: '<strong style="color:#0F766E;font-size:11px;letter-spacing:.1em;' +
+              'text-transform:uppercase">Return</strong>' }
+          : { html: '' },
+
+        returnLeg
+          ? { type: 'facts', items: [
+              { label: 'Reference', value: reference(returnLeg) },
+              { label: 'Date', value: longDate(returnLeg.booking_date) },
+              { label: 'Pick-up time', value: shortTime(returnLeg.booking_time) },
+              { label: 'This leg', value: money(returnLeg.price, returnLeg.currency) }
+            ]}
+          : { html: '' },
+
+        returnLeg
+          ? { type: 'route', from: returnLeg.pickup, to: returnLeg.dropoff }
+          : { html: '' },
+
+        returnLeg
+          ? { type: 'note', tone: 'ok', html:
+              '<strong>Paid in total: ' +
+              esc(money(Number(booking.price || 0) + Number(returnLeg.price || 0),
+                        booking.currency)) + '</strong><br>' +
+              'One payment, two transfers. Each has its own driver and can be cancelled ' +
+              'on its own without affecting the other.' }
+          : { html: '' },
         { type: 'note', tone: 'ok', html:
           '<strong>Free cancellation until 24 hours before pick-up.</strong><br>' +
           'Cancel from your account and the full amount goes back to your card, automatically.' },
@@ -385,14 +424,16 @@ export async function sendBookingConfirmation(booking, passwordLink) {
       ].filter((b) => b.html !== ''),
       cta: passwordLink
         ? { href: passwordLink, label: 'Choose a password' }
-        : { href: `${SITE}/myaccount`, label: 'See my trip' }
+        : { href: `${SITE}/myaccount`, label: returnLeg ? 'See my trips' : 'See my trip' }
     });
 
     return await sendOnce({
       key: `booking_confirmed:${ref}`,
       template: 'booking_confirmed',
       to: booking.passenger_email || booking.email,
-      subject: `Transfer confirmed — ${longDate(booking.booking_date)} at ${shortTime(booking.booking_time)}`,
+      subject: returnLeg
+        ? `Both transfers confirmed — ${longDate(booking.booking_date)} and ${longDate(returnLeg.booking_date)}`
+        : `Transfer confirmed — ${longDate(booking.booking_date)} at ${shortTime(booking.booking_time)}`,
       html,
       bookingId: booking.id
     });
@@ -403,7 +444,7 @@ export async function sendBookingConfirmation(booking, passwordLink) {
 }
 
 /** Reservado sem pagar: o cartão ficou guardado. */
-export async function sendCardSaved(booking, chargeAt) {
+export async function sendCardSaved(booking, chargeAt, returnLeg) {
   try {
     const ref = reference(booking);
     const when = chargeAt
