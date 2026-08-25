@@ -1960,6 +1960,166 @@ app.post('/api/tasks/preview-emails', async (req, res) => {
   return res.json({ to, sent, total: results.length, results });
 });
 
+/**
+ * Envia os dados do motorista de uma viagem.
+ *
+ * Usada pelo cron e pelo botão do admin. A ordem importa: um
+ * motorista posto à mão ganha sempre ao do parceiro, porque foi
+ * posto à mão precisamente quando o do parceiro não servia.
+ */
+async function sendDriverDetailsFor(ride) {
+  let driver = null;
+  let vehicle = null;
+
+  if (ride.manual_driver_name) {
+    driver = {
+      full_name: ride.manual_driver_name,
+      phone: ride.manual_driver_phone || ''
+    };
+    vehicle = ride.manual_vehicle
+      ? {
+          make: ride.manual_vehicle,
+          model: '',
+          plate: ride.manual_vehicle_plate || ''
+        }
+      : null;
+  } else if (ride.assigned_partner_id) {
+    const [driverRes, vehicleRes] = await Promise.all([
+      supabase.from('drivers').select('*')
+        .eq('partner_id', ride.assigned_partner_id)
+        .eq('status', 'active').order('created_at').limit(1).maybeSingle(),
+      supabase.from('partner_vehicles').select('*')
+        .eq('partner_id', ride.assigned_partner_id)
+        .eq('status', 'active')
+        .gte('seats', ride.passengers || 1)
+        .order('seats').limit(1).maybeSingle()
+    ]);
+
+    driver = driverRes.data;
+    vehicle = vehicleRes.data;
+  }
+
+  if (!driver) {
+    // Sem motorista não há email. É um problema real, porque a
+    // viagem é amanhã e o cliente não sabe quem o vai buscar.
+    await notifyOps('Ride tomorrow with no driver', [
+      `Reference: ${ride.booking_reference || ride.booking_id}`,
+      `Route: ${ride.pickup} to ${ride.dropoff}`,
+      `Pick-up: ${ride.booking_date} ${String(ride.booking_time || '').slice(0, 5)}`,
+      ride.assigned_partner_id
+        ? 'A partner took this ride but has no active driver on file.'
+        : 'Nobody has taken this ride.',
+      '',
+      'Add a driver by hand in the admin, or put the email on hold.'
+    ]);
+
+    return { sent: false, reason: 'no-driver' };
+  }
+
+  const result = await sendDriverDetails(ride, driver, vehicle);
+
+  if (result.sent) {
+    await supabase.from('bookings').update({
+      driver_details_sent_at: new Date().toISOString()
+    }).eq('id', ride.id);
+  }
+
+  return result;
+}
+
+/**
+ * Suster, libertar, ou pôr um motorista à mão.
+ *
+ * Uma rota para as três coisas porque são a mesma decisão vista de
+ * ângulos diferentes: quem vai buscar o cliente amanhã.
+ */
+app.post('/api/admin/ride-driver', async (req, res) => {
+  const { user: admin, error: adminError } = await requireAdmin(req);
+  if (!admin) return res.status(403).json({ error: adminError || 'Administrator access required.' });
+
+  const { booking_id, action, driver, reason } = req.body || {};
+
+  if (!booking_id || !['hold', 'release', 'manual', 'send'].includes(action)) {
+    return res.status(400).json({
+      error: 'Send booking_id and action: hold, release, manual or send.'
+    });
+  }
+
+  try {
+    if (action === 'hold') {
+      await supabase.from('bookings').update({
+        driver_email_hold: true,
+        driver_email_hold_reason: reason || null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      return res.json({ success: true, held: true });
+    }
+
+    if (action === 'release') {
+      await supabase.from('bookings').update({
+        driver_email_hold: false,
+        driver_email_hold_reason: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      return res.json({ success: true, held: false });
+    }
+
+    if (action === 'manual') {
+      if (!driver?.name || !driver?.phone) {
+        return res.status(400).json({
+          error: 'A name and a phone number are the minimum — the passenger calls that number.'
+        });
+      }
+
+      await supabase.from('bookings').update({
+        manual_driver_name: driver.name,
+        manual_driver_phone: driver.phone,
+        manual_vehicle: driver.vehicle || null,
+        manual_vehicle_plate: driver.plate || null,
+        manual_driver_note: driver.note || null,
+        // Pôr um motorista à mão levanta a retenção: a razão para a
+        // suspender era não haver motorista, e agora há.
+        driver_email_hold: false,
+        driver_email_hold_reason: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      console.log('Manual driver set:', { by: admin.email, booking: booking_id });
+
+      return res.json({ success: true });
+    }
+
+    // send
+    const { data: ride } = await supabase.from('bookings')
+      .select('*').eq('id', booking_id).maybeSingle();
+
+    if (!ride) return res.status(404).json({ error: 'That booking no longer exists.' });
+
+    // O envio manual ignora a marca de já enviado: às vezes é
+    // preciso reenviar porque o motorista mudou.
+    await supabase.from('bookings').update({
+      driver_details_sent_at: null
+    }).eq('id', booking_id);
+
+    const result = await sendDriverDetailsFor({ ...ride, driver_details_sent_at: null });
+
+    if (!result.sent) {
+      return res.status(400).json({
+        error: result.reason === 'no-driver'
+          ? 'There is no driver for this ride yet. Add one by hand first.'
+          : (result.reason || 'Could not send.')
+      });
+    }
+
+    return res.json({ success: true, sent: true });
+  } catch (error) {
+    console.error('admin/ride-driver error:', error);
+    return res.status(500).json({ error: 'Could not update that ride.' });
+  }
+});
+
 app.post('/api/tasks/daily-emails', async (req, res) => {
   if (!process.env.CRON_SECRET) {
     return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
@@ -1968,7 +2128,10 @@ app.post('/api/tasks/daily-emails', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const out = { driver_details: 0, expiring: 0, expired: 0, unclaimed: 0, errors: [] };
+  const out = {
+    driver_details: 0, held: 0, no_driver: 0,
+    expiring: 0, expired: 0, unclaimed: 0, errors: []
+  };
 
   const day = (offset) => {
     const d = new Date();
@@ -1978,41 +2141,26 @@ app.post('/api/tasks/daily-emails', async (req, res) => {
 
   // ---------- 1. o motorista, na véspera ----------
   try {
+    // Sem filtro por assigned_partner_id: uma viagem com motorista
+    // manual pode não ter parceiro nenhum, e é precisamente essa que
+    // interessa não esquecer.
     const { data: rides } = await supabase
       .from('bookings')
       .select('*')
       .eq('booking_date', day(1))
-      .not('assigned_partner_id', 'is', null)
-      .neq('status', 'cancelled');
+      .neq('status', 'cancelled')
+      .is('driver_details_sent_at', null);
 
     for (const ride of (rides || [])) {
-      // Um motorista e um veículo do parceiro. Quando houver
-      // atribuição explícita usamos essa; até lá, o primeiro ativo.
-      const [driverRes, vehicleRes] = await Promise.all([
-        supabase.from('drivers').select('*')
-          .eq('partner_id', ride.assigned_partner_id)
-          .eq('status', 'active').limit(1).maybeSingle(),
-        supabase.from('partner_vehicles').select('*')
-          .eq('partner_id', ride.assigned_partner_id)
-          .eq('status', 'active')
-          .gte('seats', ride.passengers || 1)
-          .order('seats').limit(1).maybeSingle()
-      ]);
-
-      if (!driverRes.data) {
-        // Sem motorista não há email — e é um problema real, porque
-        // a viagem é amanhã.
-        await notifyOps('Ride tomorrow with no driver on file', [
-          `Reference: ${ride.booking_reference || ride.booking_id}`,
-          `Route: ${ride.pickup} to ${ride.dropoff}`,
-          `Pick-up: ${ride.booking_date} ${String(ride.booking_time || '').slice(0, 5)}`,
-          'The partner has taken this ride but has no active driver.'
-        ]);
+      if (ride.driver_email_hold) {
+        out.held += 1;
         continue;
       }
 
-      const result = await sendDriverDetails(ride, driverRes.data, vehicleRes.data);
+      const result = await sendDriverDetailsFor(ride);
+
       if (result.sent) out.driver_details += 1;
+      else if (result.reason === 'no-driver') out.no_driver += 1;
     }
   } catch (error) {
     out.errors.push('driver_details: ' + error.message);
