@@ -347,7 +347,7 @@ function reference(booking) {
 // ============================================================
 
 /** Pago na reserva. O mais importante de todos. */
-export async function sendBookingConfirmation(booking) {
+export async function sendBookingConfirmation(booking, passwordLink) {
   try {
     const ref = reference(booking);
 
@@ -370,9 +370,23 @@ export async function sendBookingConfirmation(booking) {
           'Cancel from your account and the full amount goes back to your card, automatically.' },
         { html: 'The day before your trip we will send you the driver&rsquo;s name, ' +
           'phone number and vehicle. If you gave us a flight number we track it, so a delay ' +
-          'moves the pick-up and never the price.' }
-      ],
-      cta: { href: `${SITE}/myaccount`, label: 'See my trip' }
+          'moves the pick-up and never the price.' },
+
+        // Quem reservou sem conta tem uma à espera, criada com o
+        // email da reserva. Dizemo-lo abertamente: criar uma conta a
+        // alguém e não avisar é o género de coisa que irrita com
+        // razão.
+        passwordLink
+          ? { type: 'note', tone: 'warn', html:
+              '<strong>We set up an account for you.</strong><br>' +
+              'It holds this booking, the receipt and the cancel button. ' +
+              'Choose a password below and it is yours &mdash; or ignore this and ' +
+              'just reply to us if you need anything.' }
+          : { html: '' }
+      ].filter((b) => b.html !== ''),
+      cta: passwordLink
+        ? { href: passwordLink, label: 'Choose a password' }
+        : { href: `${SITE}/myaccount`, label: 'See my trip' }
     });
 
     return await sendOnce({
