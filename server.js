@@ -802,6 +802,21 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   const amount = toStripeAmount(totalInCurrency, currency);
 
+  // A folga é verificada aqui também. O limite no browser é uma
+  // cortesia; esta é a regra.
+  const BOOKING_BUFFER_MINUTES = 30;
+  const pickupDate = booking.booking_date || booking.date;
+  const pickupTime = booking.booking_time || booking.time || '00:00';
+  const pickupAt = new Date(`${pickupDate}T${pickupTime}`);
+
+  if (Number.isFinite(pickupAt.getTime()) &&
+      pickupAt.getTime() < Date.now() + BOOKING_BUFFER_MINUTES * 60000) {
+    return res.status(400).json({
+      error: `We need at least ${BOOKING_BUFFER_MINUTES} minutes to arrange a driver. ` +
+             'Please choose a later pick-up time.'
+    });
+  }
+
   const pickupAirport = await findPickupAirport(booking.pickup);
 
   // A taxa fica registada na reserva. Converter mais tarde com a taxa
