@@ -369,8 +369,7 @@ export async function sendBookingConfirmation(booking, passwordLink) {
           '<strong>Free cancellation until 24 hours before pick-up.</strong><br>' +
           'Cancel from your account and the full amount goes back to your card, automatically.' },
         { html: 'The day before your trip we will send you the driver&rsquo;s name, ' +
-          'phone number and vehicle. If you gave us a flight number we track it, so a delay ' +
-          'moves the pick-up and never the price.' },
+          'phone number and vehicle. If you gave us a flight number, we track it.' },
 
         // Quem reservou sem conta tem uma à espera, criada com o
         // email da reserva. Dizemo-lo abertamente: criar uma conta a
@@ -429,8 +428,7 @@ export async function sendCardSaved(booking, chargeAt) {
         ]},
         { type: 'route', from: booking.pickup, to: booking.dropoff },
         { html: booking.flight_number
-          ? `We are tracking flight ${esc(booking.flight_number)}. If it lands late, ` +
-            'the pick-up moves and the price does not.'
+          ? `We track flight ${esc(booking.flight_number)}.`
           : 'The day before your trip we send the driver&rsquo;s name, phone number and vehicle.' },
         { type: 'note', tone: 'warn', html:
           `<strong>We charge ${esc(money(booking.price, booking.currency))} on ${esc(when)}.</strong><br>` +
@@ -609,7 +607,8 @@ export async function sendDriverDetails(booking, driver, vehicle) {
         { type: 'route', from: booking.pickup, to: booking.dropoff },
         { type: 'note', tone: 'ok', html: booking.flight_number
           ? `<strong>We are tracking flight ${esc(booking.flight_number)}.</strong><br>` +
-            'If it lands late the driver waits, and you are not charged for it.'
+            'If it lands late the driver waits, and you are not charged for it. ' +
+            'They will contact you with the exact meeting point.'
           : '<strong>Your driver will be waiting at the pick-up point.</strong><br>' +
             'If you cannot find each other, call the number above.' },
         { html: 'Save this driver&rsquo;s number to your phone now &mdash; it is much easier ' +
