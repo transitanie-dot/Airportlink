@@ -1830,17 +1830,23 @@ app.post('/api/stripe-webhook', async (req, res) => {
     let passwordLink = null;
 
     if (!userId && metadata.email) {
-      // Sem conta: criamos uma e guardamos o link para a pessoa
-      // escolher password. Vai no email de confirmação.
-      const guest = await ensureGuestAccount(
-        metadata.email,
-        metadata.full_name,
-        [metadata.phone_code, metadata.phone_number].filter(Boolean).join(' ')
-      );
+      // Isolado num try próprio: se falhar, a reserva continua a ser
+      // criada e a confirmação continua a sair. Antes, um erro aqui
+      // abortava o processador e o cliente ficava com a reserva paga
+      // e sem email nenhum.
+      try {
+        const guest = await ensureGuestAccount(
+          metadata.email,
+          metadata.full_name,
+          [metadata.phone_code, metadata.phone_number].filter(Boolean).join(' ')
+        );
 
-      if (guest) {
-        userId = guest.userId;
-        passwordLink = guest.link;
+        if (guest) {
+          userId = guest.userId;
+          passwordLink = guest.link;
+        }
+      } catch (error) {
+        console.error('[webhook] guest account step failed, carrying on:', error.message);
       }
     }
 
@@ -1944,6 +1950,9 @@ app.post('/api/stripe-webhook', async (req, res) => {
     // as liga é o trip_group_id.
     let returnBooking = null;
 
+    // Também isolado: a ida está paga, e um erro aqui não pode
+    // impedir a confirmação de sair.
+    try {
     if (metadata.trip_group_id && metadata.return_date) {
       const returnAirport = await findPickupAirport(metadata.return_pickup);
 
@@ -2018,16 +2027,44 @@ app.post('/api/stripe-webhook', async (req, res) => {
         console.log('Return leg created:', savedReturn.booking_id);
       }
     }
+    } catch (error) {
+      console.error('[webhook] return leg step failed, carrying on:', error.message);
+    }
 
     // Dois emails diferentes: quem pagou já recebe a confirmação,
     // quem só guardou o cartão recebe a data em que será cobrado.
     // Mandar a mesma coisa aos dois faria alguém pensar que já pagou.
     // Um email para a viagem toda, não um por perna. Dois emails
     // para uma compra fariam o cliente pensar que reservou duas vezes.
-    if (payLater) {
-      await sendCardSaved(savedBooking, bookingRow.charge_at, returnBooking);
-    } else {
-      await sendBookingConfirmation(savedBooking, passwordLink, returnBooking);
+    //
+    // O resultado fica no log, para se perceber sem adivinhar se o
+    // email saiu, foi descartado por duplicado, ou falhou.
+    try {
+      const emailResult = payLater
+        ? await sendCardSaved(savedBooking, bookingRow.charge_at, returnBooking)
+        : await sendBookingConfirmation(savedBooking, passwordLink, returnBooking);
+
+      console.log('[webhook] confirmation email:', {
+        booking: savedBooking.booking_id || savedBooking.id,
+        to: savedBooking.passenger_email || savedBooking.email,
+        mode: payLater ? 'card_saved' : 'booking_confirmed',
+        sent: emailResult.sent,
+        reason: emailResult.reason || null
+      });
+
+      // Um cliente que pagou e não recebeu confirmação é um
+      // telefonema garantido. Melhor saberes tu primeiro.
+      if (!emailResult.sent && emailResult.reason !== 'duplicate') {
+        await notifyOps('A customer did not get their confirmation', [
+          `Booking: ${savedBooking.booking_reference || savedBooking.booking_id}`,
+          `Customer: ${savedBooking.full_name} (${savedBooking.email})`,
+          `Reason: ${emailResult.reason || 'unknown'}`,
+          '',
+          'They have paid and the booking exists. Send it by hand.'
+        ]);
+      }
+    } catch (error) {
+      console.error('[webhook] confirmation email threw:', error);
     }
   }
 
