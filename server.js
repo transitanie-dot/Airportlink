@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
@@ -515,6 +516,69 @@ const VERIFY_REQUIRED = {
   partner: true,
   agent: true
 };
+
+/**
+ * A conta de quem reservou sem se registar.
+ *
+ * Criamos uma na mesma, com o email da reserva, e mandamos-lhe um
+ * link para escolher password. Assim ninguém é obrigado a registar-se
+ * a meio de uma compra — que é onde se perdem clientes — mas quem
+ * voltar encontra o histórico à espera.
+ *
+ * Devolve o link, ou null se a conta já existia (aí a pessoa já sabe
+ * entrar e mandar-lhe um link de password seria estranho).
+ */
+async function ensureGuestAccount(email, name, phone) {
+  if (!email) return null;
+
+  try {
+    const { data: existing } = await supabase
+      .from('contacts')
+      .select('id')
+      .ilike('email', email)
+      .maybeSingle();
+
+    if (existing?.id) return { userId: existing.id, link: null };
+
+    // Password aleatória que ninguém vai usar: a pessoa entra pelo
+    // link, e uma password vazia não é permitida.
+    const { data: created, error } = await supabase.auth.admin.createUser({
+      email,
+      password: crypto.randomUUID() + crypto.randomUUID(),
+      email_confirm: true,
+      user_metadata: { full_name: name || '', created_via: 'guest_booking' }
+    });
+
+    if (error || !created?.user) {
+      console.error('guest account failed:', error?.message);
+      return null;
+    }
+
+    await supabase.from('contacts').upsert({
+      id: created.user.id,
+      email,
+      full_name: name || null,
+      phone_number: phone || null,
+      is_admin: false
+    }, { onConflict: 'email' });
+
+    const { data: linkData } = await supabase.auth.admin.generateLink({
+      type: 'recovery',
+      email,
+      options: { redirectTo: `${SITE_ORIGIN}/resetpassword` }
+    });
+
+    console.log('Guest account created for', email);
+
+    return {
+      userId: created.user.id,
+      link: linkData?.properties?.action_link || null
+    };
+  } catch (error) {
+    console.error('ensureGuestAccount error:', error);
+    return null;
+  }
+}
 
 /**
  * A confirmação de email é enviada pelo SUPABASE, não por aqui.
@@ -1682,16 +1746,20 @@ app.post('/api/stripe-webhook', async (req, res) => {
     }
 
     let userId = metadata.user_id || null;
+    let passwordLink = null;
 
     if (!userId && metadata.email) {
-      const { data: contact } = await supabase
-        .from('contacts')
-        .select('id')
-        .ilike('email', metadata.email)
-        .maybeSingle();
+      // Sem conta: criamos uma e guardamos o link para a pessoa
+      // escolher password. Vai no email de confirmação.
+      const guest = await ensureGuestAccount(
+        metadata.email,
+        metadata.full_name,
+        [metadata.phone_code, metadata.phone_number].filter(Boolean).join(' ')
+      );
 
-      if (contact?.id) {
-        userId = contact.id;
+      if (guest) {
+        userId = guest.userId;
+        passwordLink = guest.link;
       }
     }
 
@@ -1792,7 +1860,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
     if (payLater) {
       await sendCardSaved(savedBooking, bookingRow.charge_at);
     } else {
-      await sendBookingConfirmation(savedBooking);
+      await sendBookingConfirmation(savedBooking, passwordLink);
     }
   }
 
