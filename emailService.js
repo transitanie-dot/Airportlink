@@ -408,10 +408,16 @@ export async function sendCardSaved(booking, chargeAt) {
           { label: 'Date', value: longDate(booking.booking_date) },
           { label: 'Pick-up time', value: shortTime(booking.booking_time) },
           { label: 'Passengers', value: booking.passengers },
+          { label: 'Flight', value: booking.flight_number },
+          { label: 'Vehicle', value: booking.vehicle_type },
           { label: 'To be charged', value: money(booking.price, booking.currency) },
           { label: 'Charge date', value: when }
         ]},
         { type: 'route', from: booking.pickup, to: booking.dropoff },
+        { html: booking.flight_number
+          ? `We are tracking flight ${esc(booking.flight_number)}. If it lands late, ` +
+            'the pick-up moves and the price does not.'
+          : 'The day before your trip we send the driver&rsquo;s name, phone number and vehicle.' },
         { type: 'note', tone: 'warn', html:
           `<strong>We charge ${esc(money(booking.price, booking.currency))} on ${esc(when)}.</strong><br>` +
           'Cancel before then and nothing is ever taken from your card. ' +
@@ -875,10 +881,13 @@ export async function sendAgentDecision(agent, decision, reason) {
 /**
  * Confirmar o endereço.
  *
- * O texto muda conforme bloqueie ou não o acesso, porque a ação que
- * se pede é diferente: a um motorista dizemos "confirma para
- * continuar"; a um cliente que já reservou dizemos "confirma quando
- * puderes", e não o mandamos parar o que estava a fazer.
+ * NOTA: a confirmação de email, a recuperação de password e o aviso
+ * de password alterada passaram para o Supabase, configurado com o
+ * SMTP do Resend. Gerar os links à mão era trabalho a mais e uma
+ * coisa a menos a funcionar sozinha.
+ *
+ * Isto fica para o caso de um dia se querer um email de boas-vindas
+ * com desenho próprio, separado da confirmação. Não é usado.
  */
 export async function sendVerifyEmail(person, link, { blocking }) {
   try {
