@@ -774,7 +774,33 @@ app.post('/api/create-checkout-session', async (req, res) => {
   const grossInCurrency = convertFromEUR(priceEUR, currency, rates);
   const priceInCurrency = convertFromEUR(netPriceEUR, currency, rates);
 
-  const amount = toStripeAmount(priceInCurrency, currency);
+  // A volta é a mesma rota ao contrário, noutra data. Vem como um
+  // objeto à parte porque cada perna é uma reserva independente.
+  const ret = booking.return_leg && booking.return_leg.date
+    ? {
+        date: booking.return_leg.date,
+        time: booking.return_leg.time,
+        pickup: booking.return_leg.pickup || booking.dropoff,
+        dropoff: booking.return_leg.dropoff || booking.pickup
+      }
+    : null;
+
+  // A volta percorre a mesma distância, por isso custa o mesmo antes
+  // de descontos. O desconto de ida e volta vem da configuração e é
+  // zero por omissão: um desconto é decisão comercial, não um valor
+  // a inventar no código.
+  const rules = await getPaymentRules();
+  const returnDiscount = ret ? Number(rules.return_discount_pct || 0) : 0;
+
+  const returnPriceEUR = ret
+    ? priceEUR * (1 - returnDiscount / 100)
+    : 0;
+  const returnNetEUR = returnPriceEUR * (1 - commission / 100);
+
+  const totalNetEUR = netPriceEUR + returnNetEUR;
+  const totalInCurrency = convertFromEUR(totalNetEUR, currency, rates);
+
+  const amount = toStripeAmount(totalInCurrency, currency);
 
   const pickupAirport = await findPickupAirport(booking.pickup);
 
@@ -821,6 +847,15 @@ app.post('/api/create-checkout-session', async (req, res) => {
     agent_gross_price: agent ? String(grossInCurrency.toFixed(2)) : '',
     price_eur: String(priceEUR.toFixed(2)),
     fx_rate: String(fxRate),
+    // O grupo é gerado aqui e viaja nos metadados. Gerá-lo no
+    // webhook daria grupos diferentes se ele chegasse duas vezes.
+    trip_group_id: ret ? crypto.randomUUID() : '',
+    return_date: ret ? ret.date : '',
+    return_time: ret ? ret.time || '' : '',
+    return_pickup: ret ? ret.pickup : '',
+    return_dropoff: ret ? ret.dropoff : '',
+    return_price: ret ? String(convertFromEUR(returnNetEUR, currency, rates).toFixed(2)) : '',
+    return_price_eur: ret ? String(returnNetEUR.toFixed(2)) : '',
     country_from: countryFrom || '',
     country_to: countryTo || '',
     // Só faz sentido numa reserva de agência, e só o servidor sabe
@@ -896,17 +931,46 @@ app.post('/api/create-checkout-session', async (req, res) => {
       session = await stripe.checkout.sessions.create({
         payment_method_types: ['card'],
         mode: 'payment',
-        line_items: [{
-          price_data: {
-            currency: currency.toLowerCase(),
-            product_data: {
-              name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
-              description: parts.join(', ')
-            },
-            unit_amount: amount
-          },
-          quantity: 1
-        }],
+        // Uma linha por perna. O cliente vê as duas na página do
+        // Stripe em vez de um total que não sabe de onde vem.
+        line_items: ret
+          ? [
+              {
+                price_data: {
+                  currency: currency.toLowerCase(),
+                  product_data: {
+                    name: `Outbound: ${booking.pickup} to ${booking.dropoff}`,
+                    description: `${metadata.booking_date} · ${parts.join(', ')}`
+                  },
+                  unit_amount: toStripeAmount(priceInCurrency, currency)
+                },
+                quantity: 1
+              },
+              {
+                price_data: {
+                  currency: currency.toLowerCase(),
+                  product_data: {
+                    name: `Return: ${ret.pickup} to ${ret.dropoff}`,
+                    description: `${ret.date} · ${passengers} passengers` +
+                      (returnDiscount ? ` · ${returnDiscount}% return discount` : '')
+                  },
+                  unit_amount: toStripeAmount(
+                    convertFromEUR(returnNetEUR, currency, rates), currency)
+                },
+                quantity: 1
+              }
+            ]
+          : [{
+              price_data: {
+                currency: currency.toLowerCase(),
+                product_data: {
+                  name: `Transfer: ${booking.pickup} to ${booking.dropoff}`,
+                  description: parts.join(', ')
+                },
+                unit_amount: amount
+              },
+              quantity: 1
+            }],
         success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${SITE_ORIGIN}/?cancel=true`,
         customer_email: booking.email,
@@ -1801,6 +1865,8 @@ app.post('/api/stripe-webhook', async (req, res) => {
       agent_reference: metadata.agent_reference || null,
       pickup_airport: metadata.pickup_airport || null,
       pickup_city: metadata.pickup_city || null,
+      trip_group_id: metadata.trip_group_id || null,
+      leg: metadata.trip_group_id ? 1 : null,
       country_from: metadata.country_from || null,
       country_to: metadata.country_to || null,
       // Onde a viagem acontece decide, em vários regimes fiscais,
@@ -1856,13 +1922,97 @@ app.post('/api/stripe-webhook', async (req, res) => {
       );
     }
 
+    // ---------- a perna de regresso ----------
+    //
+    // Uma reserva completa e independente: pode ir para outro
+    // parceiro, ter outro motorista e ser cancelada sozinha. O que
+    // as liga é o trip_group_id.
+    let returnBooking = null;
+
+    if (metadata.trip_group_id && metadata.return_date) {
+      const returnAirport = await findPickupAirport(metadata.return_pickup);
+
+      const returnRow = {
+        ...bookingRow,
+        booking_id: `${bookingRow.booking_id}-R`,
+        booking_reference: bookingRow.booking_reference
+          ? `${bookingRow.booking_reference}-R`
+          : null,
+        leg: 2,
+        pickup: metadata.return_pickup,
+        dropoff: metadata.return_dropoff,
+        booking_date: metadata.return_date,
+        booking_time: metadata.return_time || null,
+        pickup_airport: returnAirport.iata || null,
+        pickup_city: returnAirport.city || null,
+        price: metadata.return_price ? Number(metadata.return_price) : bookingRow.price,
+        price_eur: metadata.return_price_eur
+          ? Number(metadata.return_price_eur)
+          : bookingRow.price_eur,
+        // O voo é o da chegada. Na volta o cliente está a partir, e
+        // um número de voo errado faria o motorista esperar por um
+        // avião que não vem.
+        flight_number: null,
+        // Uma cobrança só, registada na ida. Duplicar aqui daria dois
+        // débitos para uma compra.
+        stripe_checkout_session_id: `${session.id}-R`,
+        settled_eur: null,
+        stripe_fee_eur: null,
+        balance_transaction_id: null,
+        // A volta é mais tarde: tem a sua própria janela de cobrança.
+        charge_at: payLater
+          ? new Date(
+              new Date(`${metadata.return_date}T${metadata.return_time || '00:00'}`).getTime()
+              - 48 * 36e5
+            ).toISOString()
+          : null
+      };
+
+      const { data: savedReturn, error: returnError } = await supabase
+        .from('bookings')
+        .upsert(returnRow, { onConflict: 'stripe_checkout_session_id' })
+        .select()
+        .single();
+
+      if (returnError) {
+        // A ida está paga e gravada. Falhar aqui não pode desfazer
+        // isso — mas alguém tem de saber que falta uma perna.
+        console.error('Return leg failed:', returnError);
+
+        await notifyOps('Return leg was not created', [
+          `Outbound: ${bookingRow.booking_reference || bookingRow.booking_id}`,
+          `Customer: ${bookingRow.full_name} (${bookingRow.email})`,
+          `Return: ${metadata.return_pickup} to ${metadata.return_dropoff}`,
+          `On ${metadata.return_date} at ${metadata.return_time || '(no time)'}`,
+          `Error: ${returnError.message}`,
+          '',
+          'The customer paid for both legs. Create the return by hand.'
+        ]);
+      } else {
+        returnBooking = savedReturn;
+
+        await Promise.all([
+          supabase.from('bookings')
+            .update({ paired_booking_id: savedReturn.id })
+            .eq('id', savedBooking.id),
+          supabase.from('bookings')
+            .update({ paired_booking_id: savedBooking.id })
+            .eq('id', savedReturn.id)
+        ]);
+
+        console.log('Return leg created:', savedReturn.booking_id);
+      }
+    }
+
     // Dois emails diferentes: quem pagou já recebe a confirmação,
     // quem só guardou o cartão recebe a data em que será cobrado.
     // Mandar a mesma coisa aos dois faria alguém pensar que já pagou.
+    // Um email para a viagem toda, não um por perna. Dois emails
+    // para uma compra fariam o cliente pensar que reservou duas vezes.
     if (payLater) {
-      await sendCardSaved(savedBooking, bookingRow.charge_at);
+      await sendCardSaved(savedBooking, bookingRow.charge_at, returnBooking);
     } else {
-      await sendBookingConfirmation(savedBooking, passwordLink);
+      await sendBookingConfirmation(savedBooking, passwordLink, returnBooking);
     }
   }
 
