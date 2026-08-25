@@ -25,7 +25,6 @@ import {
   sendPartnerApplicationReceived,
   sendPartnerDecision,
   sendRideConfirmedToPartner,
-  sendVerifyEmail,
   previewAll,
   notifyOps
 } from './emailService.js';
@@ -518,34 +517,21 @@ const VERIFY_REQUIRED = {
 };
 
 /**
- * Cria o link de confirmação e envia-o com o nosso desenho.
+ * A confirmação de email é enviada pelo SUPABASE, não por aqui.
  *
- * Podíamos deixar o Supabase enviar, mas sairia do domínio deles,
- * com o modelo deles. Gerar o link e enviá-lo nós mantém a marca e
- * usa o domínio que já tem reputação.
+ * Configurado em Authentication > Emails com o SMTP do Resend, sai
+ * do mesmo domínio e com o mesmo aspeto, e trata também da
+ * recuperação de password e do aviso de password alterada — três
+ * emails que teríamos de escrever e manter.
+ *
+ * Basta criar a conta com email_confirm a false: o Supabase envia
+ * sozinho. Esta função existe para o registo de parceiros a poder
+ * chamar sem saber disto.
  */
 async function sendVerification(email, name, kind) {
-  try {
-    const { data, error } = await supabase.auth.admin.generateLink({
-      type: 'signup',
-      email,
-      options: { redirectTo: `${SITE_ORIGIN}/login?verified=1` }
-    });
-
-    if (error || !data?.properties?.action_link) {
-      console.error('generateLink failed:', error?.message);
-      return { sent: false };
-    }
-
-    return await sendVerifyEmail(
-      { email, name },
-      data.properties.action_link,
-      { blocking: VERIFY_REQUIRED[kind] === true }
-    );
-  } catch (error) {
-    console.error('sendVerification error:', error);
-    return { sent: false };
-  }
+  // Nada a fazer: o Supabase já enviou quando a conta foi criada.
+  console.log(`[email] verification for ${email} (${kind}) handled by Supabase`);
+  return { sent: true, by: 'supabase' };
 }
 
 app.post('/api/payment-options', async (req, res) => {
