@@ -27,6 +27,8 @@ import {
   sendPartnerDecision,
   sendRideConfirmedToPartner,
   previewAll,
+  sendPartnerStatement,
+  sendAgentStatement,
   notifyOps
 } from './emailService.js';
 import { createPartnerRoutes } from './partners.js';
@@ -2186,6 +2188,159 @@ app.post('/api/admin/ride-driver', async (req, res) => {
     console.error('admin/ride-driver error:', error);
     return res.status(500).json({ error: 'Could not update that ride.' });
   }
+});
+
+/**
+ * Os extratos do mês passado.
+ *
+ * Corre uma vez por mês, no dia 1. Se correr duas vezes não faz mal:
+ * a chave de idempotência inclui o mês, e o segundo envio é
+ * descartado antes de sair.
+ *
+ * cron-job.org → POST /api/tasks/monthly-statements
+ *                dia 1 de cada mês, 09:30
+ *
+ * Aceita { "month": "2026-07" } para reenviar um mês concreto —
+ * útil quando alguém pede o extrato de há três meses.
+ */
+app.post('/api/tasks/monthly-statements', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  // Por omissão, o mês passado: no dia 1 é esse que interessa.
+  let month = req.body && req.body.month;
+
+  if (!month) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 1);
+    month = d.toISOString().slice(0, 7);
+  }
+
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: 'month must look like 2026-07.' });
+  }
+
+  const from = `${month}-01`;
+  const to = new Date(month + '-01T12:00:00');
+  to.setMonth(to.getMonth() + 1);
+  const until = to.toISOString().slice(0, 10);
+
+  const out = { month, partners: 0, agents: 0, skipped: 0, errors: [] };
+
+  // ---------- parceiros ----------
+  try {
+    const { data: rides, error } = await supabase
+      .from('bookings')
+      .select('id, booking_id, booking_reference, pickup, dropoff, booking_date, ' +
+              'booking_time, driver_payout, driver_payout_eur, currency, assigned_partner_id')
+      .not('assigned_partner_id', 'is', null)
+      .neq('status', 'cancelled')
+      .gte('booking_date', from)
+      .lt('booking_date', until)
+      .order('booking_date');
+
+    if (error) throw error;
+
+    const byPartner = new Map();
+
+    for (const ride of (rides || [])) {
+      if (!byPartner.has(ride.assigned_partner_id)) {
+        byPartner.set(ride.assigned_partner_id, []);
+      }
+      byPartner.get(ride.assigned_partner_id).push(ride);
+    }
+
+    for (const [partnerId, list] of byPartner) {
+      const { data: partner } = await supabase
+        .from('driver_partners')
+        .select('id, email, legal_name, trading_name, payout_iban, status')
+        .eq('id', partnerId).maybeSingle();
+
+      if (!partner?.email) {
+        out.skipped += 1;
+        continue;
+      }
+
+      // Em euros, à taxa do dia de cada viagem — nunca à de hoje.
+      const total = list.reduce((t, r) =>
+        t + Number(r.driver_payout_eur || r.driver_payout || 0), 0);
+
+      const result = await sendPartnerStatement(partner, month, list, total);
+      if (result.sent) out.partners += 1;
+
+      if (!partner.payout_iban) {
+        await notifyOps('Partner with no IBAN has money owed', [
+          `Partner: ${partner.legal_name} (${partner.email})`,
+          `Month: ${month}`,
+          `Rides: ${list.length}`,
+          `Owed: EUR ${total.toFixed(2)}`,
+          '',
+          'They cannot be paid until they add payout details.'
+        ]);
+      }
+    }
+  } catch (error) {
+    out.errors.push('partners: ' + error.message);
+  }
+
+  // ---------- agências ----------
+  try {
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select('id, booking_id, booking_reference, booking_date, passenger_name, ' +
+              'price, price_eur, agent_gross_price, currency, agent_reference, booked_by')
+      .not('booked_by', 'is', null)
+      .neq('status', 'cancelled')
+      .gte('booking_date', from)
+      .lt('booking_date', until)
+      .order('booking_date');
+
+    if (error) throw error;
+
+    const byAgent = new Map();
+
+    for (const b of (bookings || [])) {
+      if (!byAgent.has(b.booked_by)) byAgent.set(b.booked_by, []);
+      byAgent.get(b.booked_by).push(b);
+    }
+
+    for (const [agentId, list] of byAgent) {
+      const { data: agent } = await supabase
+        .from('travel_agents')
+        .select('id, email, agency_name, commission, status')
+        .eq('id', agentId).maybeSingle();
+
+      if (!agent?.email) {
+        out.skipped += 1;
+        continue;
+      }
+
+      const paid = list.reduce((t, b) => t + Number(b.price_eur || b.price || 0), 0);
+      const gross = list.reduce((t, b) =>
+        t + Number(b.agent_gross_price || b.price_eur || b.price || 0), 0);
+
+      const result = await sendAgentStatement(agent, month, list, { paid, gross });
+      if (result.sent) out.agents += 1;
+    }
+  } catch (error) {
+    out.errors.push('agents: ' + error.message);
+  }
+
+  console.log('[monthly-statements]', out);
+
+  // Um resumo para ti, para saberes que correu sem ires aos logs.
+  await notifyOps(`Statements sent for ${month}`, [
+    `${out.partners} partner statement(s)`,
+    `${out.agents} agency statement(s)`,
+    out.skipped ? `${out.skipped} skipped (no email on file)` : '',
+    out.errors.length ? 'Errors: ' + out.errors.join(' · ') : ''
+  ].filter(Boolean));
+
+  return res.json({ ok: true, ...out });
 });
 
 app.post('/api/tasks/daily-emails', async (req, res) => {
