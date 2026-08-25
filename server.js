@@ -22,6 +22,11 @@ import {
   sendDriverDetails,
   sendAgentDecision,
   sendDocumentExpiring,
+  sendPartnerApplicationReceived,
+  sendPartnerDecision,
+  sendRideConfirmedToPartner,
+  sendVerifyEmail,
+  previewAll,
   notifyOps
 } from './emailService.js';
 import { createPartnerRoutes } from './partners.js';
@@ -491,6 +496,58 @@ app.get('/api/exchange-rates', async (req, res) => {
 // O calculador pergunta aqui se pode mostrar a opção de pagar
 // depois. A decisão é sempre repetida no checkout — isto é só para a
 // interface, e nunca é o que decide se se cobra ou não.
+/**
+ * Quem tem de confirmar o email antes de a conta funcionar.
+ *
+ * Motoristas e agências: sim. Têm acesso a dinheiro e a dados de
+ * terceiros, e ninguém está a meio de uma compra quando se regista.
+ *
+ * Clientes: não. O Supabase recusa o login enquanto o email não
+ * estiver confirmado, e no calculador a conta é criada a meio da
+ * reserva — bloquear aí obrigava a pessoa a sair, ir ao email e
+ * recomeçar a reserva do zero. Um cliente já se verifica de outra
+ * forma: paga com um cartão.
+ *
+ * Para mudar, é só pôr 'customer' a true. Mas lê o parágrafo acima
+ * antes de o fazeres.
+ */
+const VERIFY_REQUIRED = {
+  customer: false,
+  partner: true,
+  agent: true
+};
+
+/**
+ * Cria o link de confirmação e envia-o com o nosso desenho.
+ *
+ * Podíamos deixar o Supabase enviar, mas sairia do domínio deles,
+ * com o modelo deles. Gerar o link e enviá-lo nós mantém a marca e
+ * usa o domínio que já tem reputação.
+ */
+async function sendVerification(email, name, kind) {
+  try {
+    const { data, error } = await supabase.auth.admin.generateLink({
+      type: 'signup',
+      email,
+      options: { redirectTo: `${SITE_ORIGIN}/login?verified=1` }
+    });
+
+    if (error || !data?.properties?.action_link) {
+      console.error('generateLink failed:', error?.message);
+      return { sent: false };
+    }
+
+    return await sendVerifyEmail(
+      { email, name },
+      data.properties.action_link,
+      { blocking: VERIFY_REQUIRED[kind] === true }
+    );
+  } catch (error) {
+    console.error('sendVerification error:', error);
+    return { sent: false };
+  }
+}
+
 app.post('/api/payment-options', async (req, res) => {
   try {
     const { booking } = req.body || {};
@@ -556,7 +613,11 @@ app.post('/register', async (req, res) => {
       await supabase.auth.admin.createUser({
         email,
         password,
-        email_confirm: true,
+        // Para clientes marcamos como confirmado: o Supabase recusa
+        // o login enquanto não estiver, e isso partia a reserva a
+        // meio. O email de confirmação sai na mesma, a pedir e não
+        // a exigir.
+        email_confirm: !VERIFY_REQUIRED.customer,
         user_metadata: { full_name: name }
       });
 
@@ -594,6 +655,10 @@ app.post('/register', async (req, res) => {
         message: 'Account created but profile setup failed. Please contact support.'
       });
     }
+
+    // A confirmação sai depois de a conta existir. Se falhar, a
+    // conta continua boa — o email é um extra, não um requisito.
+    await sendVerification(email, name, 'customer');
 
     return res.json({ success: true });
   } catch (error) {
@@ -1829,6 +1894,86 @@ app.post('/api/tasks/test-email', async (req, res) => {
  *
  * cron-job.org → POST /api/tasks/daily-emails, às 09:15
  */
+/**
+ * Envio de emails para o serviço dos motoristas.
+ *
+ * O emailService vive aqui e só aqui. O outro serviço pede a esta
+ * rota em vez de ter uma cópia do ficheiro — duas cópias divergem
+ * sempre, e no dia em que divergem um dos dois manda o texto antigo.
+ *
+ * A proteção é o CRON_SECRET, mas não é só isso: os modelos são uma
+ * LISTA FECHADA. Quem tivesse o segredo não poderia mandar um email
+ * qualquer a partir do nosso domínio — apenas disparar um destes
+ * três, que são inofensivos fora de contexto.
+ */
+const INTERNAL_TEMPLATES = {
+  partner_received: (p) => sendPartnerApplicationReceived(p.partner),
+  partner_decision: (p) => sendPartnerDecision(p.partner, p.decision, p.reason),
+  ride_confirmed: (p) => sendRideConfirmedToPartner(p.partner, p.booking),
+  // O link de confirmação só pode ser gerado aqui: é este serviço
+  // que tem o cliente com service_role.
+  verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner')
+};
+
+app.post('/api/internal/email', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    console.warn('internal/email called with a bad secret');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { template, payload } = req.body || {};
+  const handler = INTERNAL_TEMPLATES[template];
+
+  if (!handler) {
+    return res.status(400).json({
+      error: `Unknown template: ${template}`,
+      allowed: Object.keys(INTERNAL_TEMPLATES)
+    });
+  }
+
+  try {
+    const result = await handler(payload || {});
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('internal/email error:', error);
+    return res.status(500).json({ error: 'Could not send that email.' });
+  }
+});
+
+/**
+ * Todos os modelos de email, de uma vez, para um endereço.
+ *
+ * Rever um email a um obriga a provocar cada acontecimento: pagar,
+ * cancelar, deixar uma cobrança falhar. Uma revisão de texto não
+ * devia custar isso.
+ *
+ * Demora cerca de doze segundos: há uma pausa entre cada um porque
+ * o Resend limita a dois por segundo no plano gratuito.
+ */
+app.post('/api/tasks/preview-emails', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
+  if (!to) {
+    return res.status(400).json({ error: 'Send { "to": "you@example.com" }.' });
+  }
+
+  const results = await previewAll(to);
+  const sent = results.filter((r) => r.sent).length;
+
+  console.log(`[email] preview: ${sent}/${results.length} sent to ${to}`);
+
+  return res.json({ to, sent, total: results.length, results });
+});
+
 app.post('/api/tasks/daily-emails', async (req, res) => {
   if (!process.env.CRON_SECRET) {
     return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
