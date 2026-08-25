@@ -74,6 +74,12 @@ export async function notifyOps(subject, lines, override) {
 
 let supabase = null;
 
+/**
+ * Quando ligada, o sendOnce não regista nem verifica duplicados.
+ * Só a pré-visualização a usa.
+ */
+let previewMode = false;
+
 /** Chamado uma vez pelo server.js, para não haver dois clientes. */
 export function initEmail(client) {
   supabase = client;
@@ -262,6 +268,17 @@ async function sendOnce({ key, template, to, subject, html, bookingId, replyTo }
   if (!to) {
     console.warn(`[email] ${template}: no recipient, skipped`);
     return { sent: false, reason: 'no-recipient' };
+  }
+
+  if (previewMode) {
+    try {
+      const providerId = await deliver({ to, subject, html, replyTo });
+      console.log(`[email] preview ${template} -> ${to}`);
+      return { sent: true, id: providerId };
+    } catch (error) {
+      console.error(`[email] preview ${template} failed:`, error.message);
+      return { sent: false, reason: error.message };
+    }
   }
 
   if (!supabase) {
@@ -849,4 +866,162 @@ export async function sendAgentDecision(agent, decision, reason) {
     console.error('[email] agent decision build failed:', error);
     return { sent: false, reason: 'build-failed' };
   }
+}
+
+// ============================================================
+// VERIFICAÇÃO DE EMAIL
+// ============================================================
+
+/**
+ * Confirmar o endereço.
+ *
+ * O texto muda conforme bloqueie ou não o acesso, porque a ação que
+ * se pede é diferente: a um motorista dizemos "confirma para
+ * continuar"; a um cliente que já reservou dizemos "confirma quando
+ * puderes", e não o mandamos parar o que estava a fazer.
+ */
+export async function sendVerifyEmail(person, link, { blocking }) {
+  try {
+    const html = wrap({
+      preheader: 'Confirm your email address.',
+      heading: blocking ? 'Confirm your email to continue' : 'Confirm your email',
+      intro: blocking
+        ? `Almost there, ${esc(person.name || 'there')}. We need to know this address ` +
+          'reaches you before your account is active.'
+        : `Welcome, ${esc(person.name || 'there')}. Confirming your address means you will ` +
+          'get your booking details and receipts without them landing in spam.',
+      blocks: [
+        blocking
+          ? { type: 'note', tone: 'warn', html:
+              '<strong>Your account is not active until you confirm.</strong><br>' +
+              'The link works for 24 hours. After that, ask for a new one from the sign-in page.' }
+          : { type: 'note', tone: 'ok', html:
+              '<strong>Your bookings work either way.</strong><br>' +
+              'Confirming just makes sure our emails reach you. The link works for 24 hours.' },
+        { html: 'If you did not create an account with us, ignore this email. ' +
+          'Nothing happens until someone clicks the link.' }
+      ],
+      cta: { href: link, label: 'Confirm my email' },
+      footNote: 'Button not working? Copy this address into your browser:<br>' +
+        `<span style="word-break:break-all;color:#0F766E">${esc(link)}</span>`
+    });
+
+    return await sendOnce({
+      key: `verify:${person.email}:${Date.now().toString().slice(0, 8)}`,
+      template: 'verify_email',
+      to: person.email,
+      subject: blocking ? 'Confirm your email to activate your account' : 'Confirm your email',
+      html
+    });
+  } catch (error) {
+    console.error('[email] verify build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+// ============================================================
+// PRÉ-VISUALIZAÇÃO
+// ============================================================
+
+/**
+ * Todos os modelos, para um endereço, com dados inventados.
+ *
+ * Existe porque rever emails um a um obriga a provocar cada
+ * acontecimento: pagar, cancelar, deixar uma cobrança falhar. Uma
+ * revisão de texto não devia custar isso.
+ *
+ * Ignora a proteção contra duplicados de propósito — quer-se poder
+ * correr isto vinte vezes seguidas enquanto se acerta uma frase.
+ */
+export async function previewAll(to) {
+  const booking = {
+    id: '00000000-0000-0000-0000-000000000000',
+    booking_reference: 'AL-PREVIEW',
+    booking_date: new Date(Date.now() + 9 * 864e5).toISOString().slice(0, 10),
+    booking_time: '08:05:00',
+    pickup: 'Porto Airport (OPO), Vila Nova da Telha, Portugal',
+    dropoff: 'Avenida dos Aliados, Porto, Portugal',
+    passengers: 3,
+    flight_number: 'TP1949',
+    price: 68.4,
+    currency: 'EUR',
+    driver_payout: 48,
+    full_name: 'Ricardo Machado',
+    email: to,
+    passenger_email: to,
+    passenger_name: 'Ricardo Machado',
+    passenger_phone: '+351 912 345 678',
+    notes: 'One large suitcase and a child seat.'
+  };
+
+  const partner = {
+    id: '00000000-0000-0000-0000-000000000001',
+    email: to,
+    legal_name: 'Porto Executive Transfers Lda',
+    contact_name: 'Ricardo'
+  };
+
+  const agent = {
+    id: '00000000-0000-0000-0000-000000000002',
+    email: to,
+    agency_name: 'Douro Travel',
+    commission: 12
+  };
+
+  const driver = { full_name: 'Miguel Ferreira', phone: '+351 913 000 111' };
+  const vehicle = { make: 'Mercedes-Benz', model: 'V-Class', plate: 'AA-00-BB' };
+
+  const chargeAt = new Date(Date.now() + 7 * 864e5).toISOString();
+
+  const jobs = [
+    ['booking_confirmed', () => sendBookingConfirmation(booking)],
+    ['card_saved',        () => sendCardSaved(booking, chargeAt)],
+    ['charge_succeeded',  () => sendChargeSucceeded(booking)],
+    ['charge_failed',     () => sendChargeFailed(booking, { attempt: 1, willRetry: true })],
+    ['charge_abandoned',  () => sendChargeFailed(booking, { attempt: 3, willRetry: false })],
+    ['cancelled_refund',  () => sendCancellation(booking, { refunded: true, amount: 68.4 })],
+    ['cancelled_free',    () => sendCancellation(booking, { refunded: false, amount: 0 })],
+    ['driver_details',    () => sendDriverDetails(booking, driver, vehicle)],
+    ['partner_received',  () => sendPartnerApplicationReceived(partner)],
+    ['partner_verified',  () => sendPartnerDecision(partner, 'verified')],
+    ['partner_approved',  () => sendPartnerDecision(partner, 'approved')],
+    ['partner_rejected',  () => sendPartnerDecision(partner, 'rejected', 'The insurance certificate had expired.')],
+    ['ride_confirmed',    () => sendRideConfirmedToPartner(partner, booking)],
+    ['document_expiring', () => sendDocumentExpiring(partner, {
+        id: 'preview', label: 'Insurance',
+        expires_on: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)
+      }, 7)],
+    ['document_expired',  () => sendDocumentExpiring(partner, {
+        id: 'preview2', label: 'Passenger transport licence',
+        expires_on: new Date(Date.now() - 864e5).toISOString().slice(0, 10)
+      }, 0)],
+    ['agent_approved',    () => sendAgentDecision(agent, 'approved')],
+    ['agent_rejected',    () => sendAgentDecision(agent, 'rejected', 'We could not verify the agency registration.')],
+    ['verify_blocking',   () => sendVerifyEmail({ email: to, name: 'Ricardo' },
+                                `${SITE}/login?preview=1`, { blocking: true })],
+    ['verify_soft',       () => sendVerifyEmail({ email: to, name: 'Ricardo' },
+                                `${SITE}/login?preview=1`, { blocking: false })]
+  ];
+
+  const results = [];
+
+  for (const [name, run] of jobs) {
+    try {
+      // Sem chave de idempotência: uma pré-visualização tem de poder
+      // correr vinte vezes seguidas enquanto se acerta uma frase.
+      previewMode = true;
+      const r = await run();
+      results.push({ template: name, sent: r.sent, reason: r.reason || null });
+    } catch (error) {
+      results.push({ template: name, sent: false, reason: error.message });
+    } finally {
+      previewMode = false;
+    }
+
+    // O Resend limita a dois por segundo no plano gratuito. Sem esta
+    // pausa, metade dos emails vinha de volta com "rate limited".
+    await new Promise((r) => setTimeout(r, 600));
+  }
+
+  return results;
 }
