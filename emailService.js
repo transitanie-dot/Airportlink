@@ -684,6 +684,10 @@ export async function sendPartnerApplicationReceived(partner) {
       intro: `Thank you, ${esc(partner.contact_name || 'there')}. ` +
         `${esc(partner.legal_name)} is now in the queue.`,
       blocks: [
+        { type: 'note', tone: 'ok', html:
+          '<strong>Your portal is at drivers.airportlink.app</strong><br>' +
+          'Bookmark it. That is where your rides, documents, vehicles and payouts live &mdash; ' +
+          'not on the main website. Sign in with the email and password you just chose.' },
         { html: 'We check every submission by hand, usually within a few working days. ' +
           'If a document is wrong or missing we tell you exactly which one and why &mdash; ' +
           'you will never get a rejection without a reason.' },
@@ -728,7 +732,9 @@ export async function sendPartnerDecision(partner, decision, reason) {
         tone: 'ok',
         note: '<strong>Take the rides that fit your day.</strong><br>' +
           'The fee shown on each ride is what reaches your account in full. ' +
-          'We take no commission on top of it.',
+          'We take no commission on top of it.<br><br>' +
+          'Everything happens at <strong>drivers.airportlink.app</strong> &mdash; ' +
+          'the ride board, your documents, your vehicles and your monthly statement.',
         cta: 'See available rides',
         subject: 'You are live on Airportlink'
       },
@@ -883,7 +889,11 @@ export async function sendAgentDecision(agent, decision, reason) {
         tone: 'ok',
         note: `<strong>${esc(agent.commission)}% off every transfer.</strong><br>` +
           'You also get a longer cancellation window and one statement a month ' +
-          'instead of a card charge per booking.',
+          'instead of a card charge per booking.<br><br>' +
+          '<strong>Nothing new to learn.</strong> Sign in where you always did &mdash; ' +
+          'your account now has an Agency tab with your bookings, your statement and ' +
+          'your saved travellers. The trade rate comes off automatically whenever you ' +
+          'book while signed in.',
         cta: 'Open my dashboard',
         subject: 'Your Airportlink trade account is open'
       },
