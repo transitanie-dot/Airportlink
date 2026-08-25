@@ -1022,7 +1022,18 @@ export async function previewAll(to) {
     ['verify_blocking',   () => sendVerifyEmail({ email: to, name: 'Ricardo' },
                                 `${SITE}/login?preview=1`, { blocking: true })],
     ['verify_soft',       () => sendVerifyEmail({ email: to, name: 'Ricardo' },
-                                `${SITE}/login?preview=1`, { blocking: false })]
+                                `${SITE}/login?preview=1`, { blocking: false })],
+    ['partner_statement', () => sendPartnerStatement(
+        { ...partner, payout_iban: 'PT50000201231234567890154' },
+        new Date().toISOString().slice(0, 7),
+        [booking, { ...booking, booking_reference: 'AL-PREV2', driver_payout: 62 }],
+        110)],
+    ['agent_statement',   () => sendAgentStatement(
+        agent,
+        new Date().toISOString().slice(0, 7),
+        [{ ...booking, agent_reference: 'PROC-4417' },
+         { ...booking, booking_reference: 'AL-PREV2', agent_reference: 'PROC-4418' }],
+        { paid: 120.4, gross: 136.8 })]
   ];
 
   const results = [];
@@ -1046,4 +1057,162 @@ export async function previewAll(to) {
   }
 
   return results;
+}
+
+// ============================================================
+// EXTRATOS MENSAIS
+// ============================================================
+
+/** Uma tabela de linhas, para os extratos. */
+function statementTable(headers, rows, alignRight) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+    style="border-collapse:collapse;margin:14px 0;font:400 13px/1.5 Arial,sans-serif">
+    <tr>${headers.map((h, i) => `<th style="padding:9px 10px;text-align:${
+      alignRight.includes(i) ? 'right' : 'left'};border-bottom:2px solid #E2E5E0;
+      font:600 10px/1.4 Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;
+      color:#606A7B">${esc(h)}</th>`).join('')}</tr>
+    ${rows.map((r) => `<tr>${r.map((c, i) => `<td style="padding:9px 10px;
+      text-align:${alignRight.includes(i) ? 'right' : 'left'};
+      border-bottom:1px solid #EFF1EE;color:#141A28">${c}</td>`).join('')}</tr>`).join('')}
+  </table>`;
+}
+
+/**
+ * O extrato do parceiro.
+ *
+ * É o email mais importante do mês para ele: é como sabe quanto vai
+ * receber. Se não sair, ele escreve — e escrever a quinze parceiros
+ * é a diferença entre uma manhã e um dia.
+ */
+export async function sendPartnerStatement(partner, month, rides, total) {
+  try {
+    const label = new Date(month + '-01T12:00:00')
+      .toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
+    const rows = rides.slice(0, 60).map((r) => [
+      esc(r.booking_reference || r.booking_id || ''),
+      esc(String(r.booking_date || '').slice(5)) + ' ' +
+        esc(String(r.booking_time || '').slice(0, 5)),
+      esc(String(r.pickup || '').slice(0, 26)),
+      `<strong>${esc(money(r.driver_payout, r.currency))}</strong>`
+    ]);
+
+    const html = wrap({
+      preheader: `${label}: ${rides.length} rides, ${money(total, 'EUR')}.`,
+      heading: `Your ${label} statement`,
+      intro: `You completed ${rides.length} transfer${rides.length === 1 ? '' : 's'} ` +
+        `in ${label}.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Rides completed', value: rides.length },
+          { label: 'Total due to you', value: money(total, 'EUR') },
+          { label: 'Paid to', value: partner.payout_iban
+            ? '••••' + String(partner.payout_iban).slice(-4)
+            : null }
+        ]},
+
+        rides.length
+          ? { html: statementTable(
+              ['Reference', 'When', 'From', 'You receive'], rows, [3]) }
+          : { html: 'No completed rides this month.' },
+
+        rides.length > 60
+          ? { html: `Showing the first 60 of ${rides.length}. ` +
+              'The full list is in your dashboard.' }
+          : { html: '' },
+
+        { type: 'note', tone: 'ok', html:
+          '<strong>The fee on each ride is what reaches you.</strong><br>' +
+          'We take no commission on top of it. Payment goes to the account on your ' +
+          'payouts page within the first working days of the month.' },
+
+        partner.payout_iban
+          ? { html: '' }
+          : { type: 'note', tone: 'bad', html:
+              '<strong>We have no account on file for you.</strong><br>' +
+              'Add your payout details in the dashboard or we cannot pay this.' },
+
+        { html: 'Something not right? Reply to this email with the reference and we ' +
+          'will look at it before the payment run.' }
+      ].filter((b) => b.html !== ''),
+      cta: { href: 'https://drivers.airportlink.app', label: 'Open my dashboard' }
+    });
+
+    return await sendOnce({
+      key: `partner_statement:${partner.id}:${month}`,
+      template: 'partner_statement',
+      to: partner.email,
+      subject: `${label} statement — ${money(total, 'EUR')} due to you`,
+      html
+    });
+  } catch (error) {
+    console.error('[email] partner statement build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
+}
+
+/**
+ * O extrato da agência.
+ *
+ * Não é uma fatura a pagar: cada reserva já foi cobrada ao cartão no
+ * momento. É um resumo para a contabilidade, e diz isso claramente —
+ * senão alguém paga duas vezes.
+ */
+export async function sendAgentStatement(agent, month, bookings, totals) {
+  try {
+    const label = new Date(month + '-01T12:00:00')
+      .toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
+    const rows = bookings.slice(0, 60).map((b) => [
+      esc(b.booking_reference || b.booking_id || '') +
+        (b.agent_reference
+          ? `<br><span style="color:#606A7B;font-size:11px">${esc(b.agent_reference)}</span>`
+          : ''),
+      esc(String(b.booking_date || '').slice(5)),
+      esc(String(b.passenger_name || '').slice(0, 22)),
+      `<strong>${esc(money(b.price, b.currency))}</strong>`
+    ]);
+
+    const html = wrap({
+      preheader: `${label}: ${bookings.length} transfers, ${money(totals.paid, 'EUR')}.`,
+      heading: `Your ${label} statement`,
+      intro: `${esc(agent.agency_name || 'Your agency')} booked ${bookings.length} ` +
+        `transfer${bookings.length === 1 ? '' : 's'} in ${label}.`,
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Transfers', value: bookings.length },
+          { label: 'You paid', value: money(totals.paid, 'EUR') },
+          { label: 'Public price', value: money(totals.gross, 'EUR') },
+          { label: 'You saved', value: money(totals.gross - totals.paid, 'EUR') },
+          { label: 'Your rate', value: `${agent.commission || 12}%` }
+        ]},
+
+        bookings.length
+          ? { html: statementTable(
+              ['Reference', 'Date', 'Passenger', 'You paid'], rows, [3]) }
+          : { html: 'No transfers booked this month.' },
+
+        // A confusão mais provável, dita à partida.
+        { type: 'note', tone: 'ok', html:
+          '<strong>Nothing to pay.</strong><br>' +
+          'Each transfer was charged to your card when you booked it. This is a summary ' +
+          'for your records, not an invoice.' },
+
+        { html: 'The full list, with the option to download it as a spreadsheet, ' +
+          'is in the Agency tab of your account.' }
+      ],
+      cta: { href: `${SITE}/myaccount`, label: 'Open my account' }
+    });
+
+    return await sendOnce({
+      key: `agent_statement:${agent.id}:${month}`,
+      template: 'agent_statement',
+      to: agent.email,
+      subject: `${label} statement — ${bookings.length} transfer${bookings.length === 1 ? '' : 's'}`,
+      html
+    });
+  } catch (error) {
+    console.error('[email] agent statement build failed:', error);
+    return { sent: false, reason: 'build-failed' };
+  }
 }
