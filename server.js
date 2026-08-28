@@ -235,7 +235,10 @@ function detectPTZone(pickupText, dropoffText) {
   for (const text of [pickupText, dropoffText]) {
     const t = String(text || '').toLowerCase();
     for (const [name, z] of Object.entries(PT_ZONES)) {
-      if (z.words.some((w) => t.includes(w))) return z;
+      // Palavra inteira: "aeroporto" contem "porto", e sem isto
+      // qualquer "Aeroporto de Faro" escrito em portugues caia na
+      // zona do Porto.
+      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return z;
     }
   }
   return PT_FALLBACK;
