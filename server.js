@@ -152,16 +152,37 @@ function convertFromEUR(amountEUR, currency, rates) {
   return amountEUR * rate * (currency === 'EUR' ? 1 : 1 + FX_MARGIN);
 }
 
-function passengerMultiplier(count) {
-  const passengers = Math.max(
-    1,
-    Math.min(16, parseInt(count || '1', 10) || 1)
-  );
+/**
+ * As classes de veículo, com o multiplicador de cada uma.
+ *
+ * A classe vem do browser mas o multiplicador vem DAQUI: quem
+ * manipular o pedido escolhe no máximo um carro maior, nunca um
+ * preço menor.
+ */
+const VEHICLE_CLASSES = {
+  sedan:     { mult: 1.0,  seats: 3 },
+  premium:   { mult: 1.47, seats: 4 },
+  van:       { mult: 1.7,  seats: 8 },
+  van_sedan: { mult: 2.5,  seats: 12 },
+  two_vans:  { mult: 3.2,  seats: 16 }
+};
 
-  if (passengers <= 4) return 1.0;
-  if (passengers <= 8) return 1.5;
-  if (passengers <= 12) return 2.0;
-  return 2.5;
+/**
+ * A classe pedida, ou a mais barata em que o grupo cabe.
+ *
+ * Também é a rede de segurança: 6 pessoas num "sedan" sobem para a
+ * van — nunca se vende um carro onde o grupo não cabe.
+ */
+function resolveVehicleClass(requested, passengers) {
+  const pax = Math.max(1, Math.min(16, parseInt(passengers || '1', 10) || 1));
+  const wanted = VEHICLE_CLASSES[String(requested || '').toLowerCase()];
+
+  if (wanted && pax <= wanted.seats) return wanted;
+
+  for (const c of ['sedan', 'van', 'van_sedan', 'two_vans']) {
+    if (pax <= VEHICLE_CLASSES[c].seats) return VEHICLE_CLASSES[c];
+  }
+  return VEHICLE_CLASSES.two_vans;
 }
 
 function toStripeAmount(amount, currencyCode) {
@@ -182,27 +203,57 @@ function fromStripeAmount(amount, currencyCode) {
     : Number(amount) / 100;
 }
 
-function computePriceEUR(distanceKm, passengers, isPortugalRoute) {
-  const pricing = isPortugalRoute
-    ? {
-        BASE_FARE: 40,
-        PRICE_PER_KM: 1.6,
-        MIN_PRICE: 25,
-        PRICE_MARKUP: 1.0
-      }
-    : {
-        BASE_FARE: 20,
-        PRICE_PER_KM: 3.5,
-        MIN_PRICE: 25,
-        PRICE_MARKUP: 1.3
-      };
+/**
+ * As zonas de Portugal, cada uma com a sua tabela.
+ *
+ * Vêm do estudo da concorrência de 28/08/2026 (19 rotas medidas,
+ * km confirmados no site deles), a 2% abaixo:
+ *   Faro erro 1,6% · Porto 4,4% · Lisboa 6,8%.
+ * O fallback é a média das três — serve Madeira e Açores até serem
+ * medidos. Cada cidade tem MESMO tabela própria: o Porto custa 51%
+ * mais por km do que Lisboa; uma fórmula nacional falhava sempre.
+ */
+const PT_ZONES = {
+  lisbon: { base: 23.23, perKm: 0.909,
+    words: ['lisbon', 'lisboa', 'cascais', 'sintra', 'estoril', 'setubal',
+            'setúbal', 'ericeira', 'obidos', 'óbidos', 'nazare', 'nazaré',
+            'evora', 'évora', 'fatima', 'fátima', 'peniche', 'sesimbra'] },
+  porto:  { base: 7.14, perKm: 1.401,
+    words: ['porto', 'oporto', 'matosinhos', 'gaia', 'braga', 'guimaraes',
+            'guimarães', 'aveiro', 'espinho', 'viana do castelo', 'povoa',
+            'póvoa', 'coimbra'] },
+  faro:   { base: 4.45, perKm: 1.116,
+    words: ['faro', 'albufeira', 'lagos', 'portimao', 'portimão', 'vilamoura',
+            'quarteira', 'tavira', 'sagres', 'carvoeiro', 'alvor', 'olhao',
+            'olhão', 'monte gordo', 'algarve', 'almancil', 'quinta do lago'] }
+};
 
-  const price =
-    (pricing.BASE_FARE + distanceKm * pricing.PRICE_PER_KM) *
-    pricing.PRICE_MARKUP *
-    passengerMultiplier(passengers);
+const PT_FALLBACK = { base: 11.61, perKm: 1.142 };
 
-  return price < pricing.MIN_PRICE ? pricing.MIN_PRICE : price;
+/** A zona, pelo texto das moradas. A recolha manda; o destino desempata. */
+function detectPTZone(pickupText, dropoffText) {
+  for (const text of [pickupText, dropoffText]) {
+    const t = String(text || '').toLowerCase();
+    for (const [name, z] of Object.entries(PT_ZONES)) {
+      if (z.words.some((w) => t.includes(w))) return z;
+    }
+  }
+  return PT_FALLBACK;
+}
+
+function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
+  const o = opts || {};
+  const vehicle = resolveVehicleClass(o.vehicleClass, passengers);
+
+  if (isPortugalRoute) {
+    const zone = detectPTZone(o.pickupText, o.dropoffText);
+    const price = (zone.base + distanceKm * zone.perKm) * vehicle.mult;
+    return Math.max(24, price);
+  }
+
+  // Fora de Portugal, a fórmula antiga até cada país ter estudo.
+  const price = (20 + distanceKm * 3.5) * 1.3 * vehicle.mult;
+  return Math.max(25, price);
 }
 
 /**
@@ -761,7 +812,12 @@ app.post('/api/create-checkout-session', async (req, res) => {
   const priceEUR = computePriceEUR(
     distanceKm,
     passengers,
-    isPortugalRoute
+    isPortugalRoute,
+    {
+      vehicleClass: booking.vehicle_class,
+      pickupText: booking.pickup,
+      dropoffText: booking.dropoff
+    }
   );
 
   // Se quem pede for um agente aprovado, aplica-se a margem dele.
@@ -1012,6 +1068,121 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 });
 
+/**
+ * Completa uma reserva a partir da sessão do Stripe.
+ *
+ * Não substitui o webhook: é o que garante que um webhook falhado
+ * não deixa um cliente pago e sem confirmação. Só toca no que
+ * estiver em falta.
+ */
+async function repairBookingFromSession(session) {
+  if (!session || session.payment_status !== 'paid') return;
+
+  const metadata = session.metadata || {};
+  if (!metadata.email && !metadata.passenger_email) return;
+
+  const { data: existing } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('stripe_checkout_session_id', session.id)
+    .maybeSingle();
+
+  // Já está completa: nada a fazer. O price_eur é a marca de que
+  // passou pelo webhook novo.
+  if (existing && existing.price_eur !== null && existing.booking_reference) {
+    return;
+  }
+
+  console.warn('[confirm] incomplete booking, repairing:', session.id);
+
+  const patch = {
+    booking_reference: existing?.booking_reference || metadata.booking_reference || null,
+    price_eur: metadata.price_eur ? Number(metadata.price_eur) : null,
+    fx_rate: metadata.fx_rate ? Number(metadata.fx_rate) : null,
+    fx_rate_at: new Date().toISOString(),
+    pickup_airport: metadata.pickup_airport || null,
+    pickup_city: metadata.pickup_city || null,
+    country_from: metadata.country_from || null,
+    country_to: metadata.country_to || null,
+    cross_border: metadata.country_from && metadata.country_to
+      ? metadata.country_from !== metadata.country_to
+      : null,
+    flight_number: metadata.flight_number || null,
+    passenger_name: metadata.passenger_name || null,
+    passenger_email: metadata.passenger_email || null,
+    passenger_phone: metadata.passenger_phone || null,
+    agent_reference: metadata.agent_reference || null,
+    payment_mode: metadata.payment_mode || 'now',
+    updated_at: new Date().toISOString()
+  };
+
+  let booking = existing;
+
+  if (existing) {
+    const { data } = await supabase
+      .from('bookings')
+      .update(patch)
+      .eq('id', existing.id)
+      .select()
+      .single();
+
+    booking = data || existing;
+  } else {
+    // Nem sequer existe: o webhook não correu de todo.
+    const { data, error } = await supabase
+      .from('bookings')
+      .upsert({
+        ...patch,
+        stripe_checkout_session_id: session.id,
+        full_name: metadata.full_name || null,
+        email: metadata.email || null,
+        phone: metadata.phone || null,
+        pickup: metadata.pickup || null,
+        dropoff: metadata.dropoff || null,
+        booking_date: metadata.booking_date || null,
+        booking_time: metadata.booking_time || null,
+        passengers: Number(metadata.passengers || 1),
+        price: metadata.price ? Number(metadata.price) : null,
+        currency: metadata.currency || 'EUR',
+        distance_km: metadata.distance_km ? Number(metadata.distance_km) : null,
+        duration_minutes: metadata.duration_minutes ? Number(metadata.duration_minutes) : null,
+        notes: metadata.notes || null,
+        status: 'paid',
+        payment_status: 'paid'
+      }, { onConflict: 'stripe_checkout_session_id' })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[confirm] could not create booking:', error.message);
+      return;
+    }
+
+    booking = data;
+
+    await notifyOps('A booking was saved by the fallback, not the webhook', [
+      `Session: ${session.id}`,
+      `Customer: ${metadata.full_name} (${metadata.email})`,
+      '',
+      'The Stripe webhook did not create this booking. Check that the endpoint in',
+      'Stripe points at https://airportlink.onrender.com/api/stripe-webhook',
+      'and that it is returning 200.'
+    ]);
+  }
+
+  if (!booking) return;
+
+  // A email_log trata dos duplicados: se o webhook chegar depois e
+  // tentar enviar, é descartado.
+  const result = await sendBookingConfirmation(booking, null, null);
+
+  console.log('[confirm] confirmation email:', {
+    booking: booking.booking_id || booking.id,
+    sent: result.sent,
+    reason: result.reason || null
+  });
+}
+
 app.post('/api/confirm-payment', async (req, res) => {
   const { session_id } = req.body;
 
@@ -1030,6 +1201,21 @@ app.post('/api/confirm-payment', async (req, res) => {
       : null;
 
     const charge = paymentIntent?.latest_charge || null;
+
+    // ---------- rede de segurança ----------
+    //
+    // Esta rota corre quando o cliente volta do Stripe. Se o webhook
+    // não tiver corrido — endereço errado, serviço em baixo, evento
+    // perdido — a reserva ou não existe ou está incompleta, e o
+    // cliente nunca receberia confirmação.
+    //
+    // Aqui completamos o que faltar e enviamos o email. A email_log
+    // impede que saia duas vezes se o webhook aparecer depois.
+    try {
+      await repairBookingFromSession(session);
+    } catch (error) {
+      console.error('[confirm] repair failed:', error.message);
+    }
 
     return res.json({
       id: session.id,
