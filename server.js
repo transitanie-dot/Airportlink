@@ -159,12 +159,24 @@ function convertFromEUR(amountEUR, currency, rates) {
  * manipular o pedido escolhe no máximo um carro maior, nunca um
  * preço menor.
  */
+/**
+ * As classes, com o multiplicador de Portugal.
+ *
+ * As combinações estavam ABAIXO do custo das viaturas que enviam:
+ * uma Van+Sedan é literalmente uma van (1,70) mais um sedan (1,00),
+ * ou seja 2,70 — e cobrava-se 2,50. Duas vans são 3,40 e cobrava-se
+ * 3,20. Cada uma dessas reservas dava prejuízo garantido.
+ *
+ * Agora ficam 5-6% acima da soma das partes, para pagar o segundo
+ * motorista, o segundo regresso vazio e a coordenação entre viaturas.
+ * Continua muito abaixo dos 24% que a Transfeero cobra em Espanha.
+ */
 const VEHICLE_CLASSES = {
   sedan:     { id: 'sedan',     mult: 1.0,  seats: 3 },
   premium:   { id: 'premium',   mult: 1.47, seats: 4 },
   van:       { id: 'van',       mult: 1.7,  seats: 8 },
-  van_sedan: { id: 'van_sedan', mult: 2.5,  seats: 12 },
-  two_vans:  { id: 'two_vans',  mult: 3.2,  seats: 16 }
+  van_sedan: { id: 'van_sedan', mult: 2.85, seats: 12 },
+  two_vans:  { id: 'two_vans',  mult: 3.6,  seats: 16 }
 };
 
 /**
@@ -249,17 +261,20 @@ const PT_FALLBACK = { base: 11.61, perKm: 1.142 };
  *    nós cobrávamos 2,50x e 3,20x. Duas viaturas são duas viaturas.
  */
 const ES_ZONES = {
-  madrid: { base: 39.87, perKm: 1.3316, premium: 1.447,
+  madrid: { base: 39.87, perKm: 1.3316, premium: 1.516,
+    van: 1.508, van_sedan: 3.737, two_vans: 4.189,
     words: ['madrid', 'barajas', 'alcala', 'alcalá', 'toledo', 'segovia',
             'aranjuez', 'avila', 'ávila', 'chinchon', 'chinchón'] },
-  barcelona: { base: 29.04, perKm: 1.3106, premium: 1.411,
+  barcelona: { base: 29.04, perKm: 1.3106, premium: 1.426,
+    van: 1.455, van_sedan: 3.605, two_vans: 4.041,
     words: ['barcelona', 'prat', 'rambla', 'sitges', 'girona', 'lloret',
             'tossa', 'andorra', 'figueres', 'tarragona', 'salou', 'reus'] }
 };
 
 /** Málaga: a tabela dela serve toda a Espanha que não seja Madrid nem
  *  Barcelona, incluindo a própria Málaga. */
-const ES_FALLBACK = { base: 39.76, perKm: 1.2843, premium: 1.484 };
+const ES_FALLBACK = { base: 39.76, perKm: 1.2843, premium: 1.530,
+  van: 1.484, van_sedan: 3.678, two_vans: 4.123 };
 
 /**
  * As cidades espanholas que não são Madrid nem Barcelona.
@@ -280,17 +295,13 @@ const ES_WORDS = [
 ];
 
 /**
- * As classes grandes em Espanha.
+ * Em Espanha cada zona tem os seus multiplicadores.
  *
- * A Van fica 10% ACIMA da deles: eles cobram 1,368x o sedan deles, e
- * como o nosso sedan é ~0,963 do deles, 1,56x sobre o nosso dá os
- * 10% pedidos. É a classe onde temos margem para cobrar mais — quem
- * viaja em grupo compara menos e valoriza o espaço.
- *
- * As combinações mantêm-se ao nível deles. Uma Van+Sedan são duas
- * viaturas e dois motoristas: abaixo disto vende-se a perder.
+ * Estão calibrados para as classes acima do Sedan ficarem entre 0% e
+ * 10% ACIMA da Transfeero — o Premium a partir de 10%. O cálculo
+ * parte do ponto onde o nosso Sedan mais desce face ao deles, para
+ * que nem a rota mais desfavorável caia abaixo do preço deles.
  */
-const ES_VEHICLE = { van: 1.56, van_sedan: 3.39, two_vans: 3.80 };
 
 /**
  * Rotas com preço próprio.
@@ -364,12 +375,10 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
     if (fixed) {
       if (vehicle.id === 'sedan') return fixed.sedan;
       if (vehicle.id === 'premium') return fixed.premium;
-      return fixed.sedan * (ES_VEHICLE[vehicle.id] || vehicle.mult);
+      return fixed.sedan * (zone[vehicle.id] || vehicle.mult);
     }
 
-    const mult = vehicle.id === 'sedan' ? 1
-      : vehicle.id === 'premium' ? zone.premium
-      : (ES_VEHICLE[vehicle.id] || vehicle.mult);
+    const mult = vehicle.id === 'sedan' ? 1 : (zone[vehicle.id] || vehicle.mult);
 
     return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult);
   }
