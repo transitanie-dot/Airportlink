@@ -279,8 +279,18 @@ const ES_WORDS = [
   'jerez', 'cadiz', 'cádiz', 'cordoba', 'córdoba', 'oviedo', 'gijon', 'gijón'
 ];
 
-/** As classes grandes, por país. Espanha cobra bem mais que Portugal. */
-const ES_VEHICLE = { van: 1.368, van_sedan: 3.39, two_vans: 3.80 };
+/**
+ * As classes grandes em Espanha.
+ *
+ * A Van fica 10% ACIMA da deles: eles cobram 1,368x o sedan deles, e
+ * como o nosso sedan é ~0,963 do deles, 1,56x sobre o nosso dá os
+ * 10% pedidos. É a classe onde temos margem para cobrar mais — quem
+ * viaja em grupo compara menos e valoriza o espaço.
+ *
+ * As combinações mantêm-se ao nível deles. Uma Van+Sedan são duas
+ * viaturas e dois motoristas: abaixo disto vende-se a perder.
+ */
+const ES_VEHICLE = { van: 1.56, van_sedan: 3.39, two_vans: 3.80 };
 
 /**
  * Rotas com preço próprio.
