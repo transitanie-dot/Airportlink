@@ -160,11 +160,11 @@ function convertFromEUR(amountEUR, currency, rates) {
  * preço menor.
  */
 const VEHICLE_CLASSES = {
-  sedan:     { mult: 1.0,  seats: 3 },
-  premium:   { mult: 1.47, seats: 4 },
-  van:       { mult: 1.7,  seats: 8 },
-  van_sedan: { mult: 2.5,  seats: 12 },
-  two_vans:  { mult: 3.2,  seats: 16 }
+  sedan:     { id: 'sedan',     mult: 1.0,  seats: 3 },
+  premium:   { id: 'premium',   mult: 1.47, seats: 4 },
+  van:       { id: 'van',       mult: 1.7,  seats: 8 },
+  van_sedan: { id: 'van_sedan', mult: 2.5,  seats: 12 },
+  two_vans:  { id: 'two_vans',  mult: 3.2,  seats: 16 }
 };
 
 /**
@@ -230,33 +230,147 @@ const PT_ZONES = {
 
 const PT_FALLBACK = { base: 11.61, perKm: 1.142 };
 
-/** A zona, pelo texto das moradas. A recolha manda; o destino desempata. */
-function detectPTZone(pickupText, dropoffText) {
+/**
+ * Espanha — estudo de 29/08/2026.
+ *
+ * Madrid e Barcelona têm tabela própria. Málaga serve de fórmula
+ * para toda a restante Espanha: das três, é a que tem o preço por km
+ * mais moderado, o que a torna a base segura para aeroportos ainda
+ * não medidos.
+ *
+ * Calibradas para NUNCA ficarem acima deles. O desvio real vai de 0
+ * a -10% conforme a rota: a fórmula deles não é uma reta perfeita, e
+ * uma reta única não consegue seguir-lhes o preço a menos de 5% em
+ * todas as distâncias ao mesmo tempo.
+ *
+ * Duas coisas que Portugal não tinha:
+ *  - HÁ suplemento de aeroporto (~10%), já embutido na base.
+ *  - As classes grandes custam mais: eles cobram 3,39x e 3,80x onde
+ *    nós cobrávamos 2,50x e 3,20x. Duas viaturas são duas viaturas.
+ */
+const ES_ZONES = {
+  madrid: { base: 39.87, perKm: 1.3316, premium: 1.447,
+    words: ['madrid', 'barajas', 'alcala', 'alcalá', 'toledo', 'segovia',
+            'aranjuez', 'avila', 'ávila', 'chinchon', 'chinchón'] },
+  barcelona: { base: 29.04, perKm: 1.3106, premium: 1.411,
+    words: ['barcelona', 'prat', 'rambla', 'sitges', 'girona', 'lloret',
+            'tossa', 'andorra', 'figueres', 'tarragona', 'salou', 'reus'] }
+};
+
+/** Málaga: a tabela dela serve toda a Espanha que não seja Madrid nem
+ *  Barcelona, incluindo a própria Málaga. */
+const ES_FALLBACK = { base: 39.76, perKm: 1.2843, premium: 1.484 };
+
+/**
+ * As cidades espanholas que não são Madrid nem Barcelona.
+ *
+ * Não têm tabela própria — usam a de Málaga. Servem só para o site
+ * reconhecer que a rota é em Espanha quando o país não vem escrito
+ * na morada, que é quase sempre.
+ */
+const ES_WORDS = [
+  'malaga', 'málaga', 'torremolinos', 'marbella', 'nerja', 'granada',
+  'fuengirola', 'benalmadena', 'benalmádena', 'estepona', 'ronda', 'mijas',
+  'puerto banus', 'puerto banús', 'sevilla', 'seville', 'valencia', 'alicante',
+  'benidorm', 'torrevieja', 'murcia', 'palma', 'mallorca', 'ibiza', 'menorca',
+  'tenerife', 'gran canaria', 'las palmas', 'lanzarote', 'fuerteventura',
+  'bilbao', 'san sebastian', 'san sebastián', 'santander', 'vigo', 'coruna',
+  'coruña', 'santiago de compostela', 'zaragoza', 'almeria', 'almería',
+  'jerez', 'cadiz', 'cádiz', 'cordoba', 'córdoba', 'oviedo', 'gijon', 'gijón'
+];
+
+/** As classes grandes, por país. Espanha cobra bem mais que Portugal. */
+const ES_VEHICLE = { van: 1.368, van_sedan: 3.39, two_vans: 3.80 };
+
+/**
+ * Rotas com preço próprio.
+ *
+ * O Sitges custa-lhes o dobro do que a fórmula de Barcelona prevê —
+ * destino de resort, procura alta. Uma fórmula não apanha isto, e
+ * publicá-lo a metade do preço deles seria vender a perder.
+ */
+const ES_ROUTE_PRICES = {
+  'barcelona|sitges': { sedan: 128.56, premium: 175.57 }
+};
+
+/** A zona, pelo texto das moradas. Palavra inteira sempre: "aeroporto"
+ *  contém "porto", e sem isso "Aeroporto de Faro" caía na zona do Porto. */
+function detectZone(zones, fallback, pickupText, dropoffText) {
   for (const text of [pickupText, dropoffText]) {
     const t = String(text || '').toLowerCase();
-    for (const [name, z] of Object.entries(PT_ZONES)) {
-      // Palavra inteira: "aeroporto" contem "porto", e sem isto
-      // qualquer "Aeroporto de Faro" escrito em portugues caia na
-      // zona do Porto.
+    for (const z of Object.values(zones)) {
       if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return z;
     }
   }
-  return PT_FALLBACK;
+  return fallback;
+}
+
+/** Espanha ou Portugal, pelo texto das moradas. */
+function detectCountry(pickupText, dropoffText) {
+  const t = (String(pickupText || '') + ' ' + String(dropoffText || '')).toLowerCase();
+
+  if (/\b(spain|espa(n|ñ)a|espanha)\b/.test(t)) return 'ES';
+  if (/\b(portugal)\b/.test(t)) return 'PT';
+
+  // Sem o país escrito, decide-se pelas cidades conhecidas.
+  for (const z of Object.values(ES_ZONES)) {
+    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'ES';
+  }
+  if (ES_WORDS.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'ES';
+  for (const z of Object.values(PT_ZONES)) {
+    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'PT';
+  }
+  return null;
+}
+
+/** Uma rota com preço combinado, se existir. */
+function routeOverride(zoneName, dropoffText) {
+  const t = String(dropoffText || '').toLowerCase();
+  for (const [key, price] of Object.entries(ES_ROUTE_PRICES)) {
+    const [zone, dest] = key.split('|');
+    if (zone === zoneName && new RegExp('\\b' + dest + '\\b').test(t)) return price;
+  }
+  return null;
 }
 
 function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
   const o = opts || {};
   const vehicle = resolveVehicleClass(o.vehicleClass, passengers);
 
-  if (isPortugalRoute) {
-    const zone = detectPTZone(o.pickupText, o.dropoffText);
-    const price = (zone.base + distanceKm * zone.perKm) * vehicle.mult;
-    return Math.max(24, price);
+  const country = detectCountry(o.pickupText, o.dropoffText) ||
+    (isPortugalRoute ? 'PT' : null);
+
+  if (country === 'ES') {
+    let zoneName = null;
+    for (const [name, z] of Object.entries(ES_ZONES)) {
+      const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
+      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
+    }
+
+    const zone = zoneName ? ES_ZONES[zoneName] : ES_FALLBACK;
+
+    // Rota com preço combinado ganha à fórmula.
+    const fixed = zoneName ? routeOverride(zoneName, o.dropoffText) : null;
+    if (fixed) {
+      if (vehicle.id === 'sedan') return fixed.sedan;
+      if (vehicle.id === 'premium') return fixed.premium;
+      return fixed.sedan * (ES_VEHICLE[vehicle.id] || vehicle.mult);
+    }
+
+    const mult = vehicle.id === 'sedan' ? 1
+      : vehicle.id === 'premium' ? zone.premium
+      : (ES_VEHICLE[vehicle.id] || vehicle.mult);
+
+    return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult);
   }
 
-  // Fora de Portugal, a fórmula antiga até cada país ter estudo.
-  const price = (20 + distanceKm * 3.5) * 1.3 * vehicle.mult;
-  return Math.max(25, price);
+  if (country === 'PT') {
+    const zone = detectZone(PT_ZONES, PT_FALLBACK, o.pickupText, o.dropoffText);
+    return Math.max(24, (zone.base + distanceKm * zone.perKm) * vehicle.mult);
+  }
+
+  // Sem país estudado, a fórmula antiga.
+  return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult);
 }
 
 /**
