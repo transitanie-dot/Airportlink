@@ -2492,7 +2492,29 @@ const INTERNAL_TEMPLATES = {
   ride_confirmed: (p) => sendRideConfirmedToPartner(p.partner, p.booking),
   // O link de confirmação só pode ser gerado aqui: é este serviço
   // que tem o cliente com service_role.
-  verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner')
+  verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
+
+  /**
+   * Um parceiro à espera há dez minutos com um agente atribuído.
+   *
+   * Vai para o endereço de operações e não para o agente: o agente
+   * já viu o aviso no painel duas vezes. Este email existe para o
+   * caso de ele não estar a ver o painel de todo.
+   */
+  support_escalation: async (p) => {
+    const nome = p.partner_name || 'A partner';
+    const min = p.waiting_minutes || 10;
+
+    await notifyOps(`${nome} has been waiting ${min} minutes for a reply`, [
+      `Partner: ${nome}`,
+      `Waiting: ${min} minutes since their last message`,
+      'The conversation is assigned to an agent — it is not sitting in the queue.',
+      'Somebody took it and has not answered.',
+      `Chat: ${p.chat_id || '(unknown)'}`
+    ]);
+
+    return { sent: true };
+  }
 };
 
 app.post('/api/internal/email', async (req, res) => {
