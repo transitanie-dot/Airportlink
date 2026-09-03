@@ -314,6 +314,125 @@ const ES_ROUTE_PRICES = {
   'barcelona|sitges': { sedan: 128.56, premium: 175.57 }
 };
 
+/**
+ * Itália — estudo de 02/09/2026.
+ *
+ * Roma é a base nacional: seis rotas medidas de 8 a 234 km.
+ * O Sedan fica sempre ABAIXO deles, o Premium sempre ACIMA.
+ *
+ * Duas coisas que Portugal e Espanha não tinham:
+ *
+ * 1. Em quatro cidades — Veneza, Florença, Milão e Cagliari — eles
+ *    NÃO oferecem sedan de todo. É decisão comercial: a procura
+ *    permite cobrar premium a toda a gente. O nosso sedan sai a 15%
+ *    abaixo do premium deles, e é a nossa maior vantagem no país:
+ *    em Florença são 36 euros de diferença numa rota de 40 km.
+ *
+ * 2. O Premium tem FÓRMULA PRÓPRIA, não um multiplicador.
+ *    O sedan e o premium deles não crescem ao mesmo ritmo — em Roma
+ *    o rácio vai de 1,22 aos 8 km a 1,09 aos 234. Um multiplicador
+ *    fixo é a média de duas curvas diferentes e falha nas pontas: ou
+ *    ficávamos 38% acima nas longas, ou abaixo deles nas curtas.
+ *
+ * Cada cidade tem MESMO tabela própria. Florença cobra 2,74 €/km no
+ * premium contra 1,64 de Roma — 67% acima. Uma fórmula nacional
+ * falharia por larga margem.
+ */
+const IT_ZONES = {
+  /**
+   * Roma: 46,25 + 1,51/km, e não os 53,65 + 1,49 da regressão.
+   *
+   * A tabela deles em Roma NÃO é uma reta: o preço por km vai de
+   * 7,99 aos 8 km a 1,80 aos 234. Uma reta por mínimos quadrados
+   * ficava 2,7% ACIMA deles nas curtas, que é o oposto do que se
+   * quer.
+   *
+   * Esta é escolhida para nunca passar de -5%, custe o que custar
+   * nas médias — aos 34 km chega a -15%. É o preço de garantir que
+   * não somos mais caros em rota nenhuma.
+   */
+  rome: { base: 46.25, perKm: 1.5100,
+    premiumBase: 76.75, premiumKm: 1.9500,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['rome', 'roma', 'fiumicino', 'ciampino', 'ostia', 'civitavecchia',
+            'frascati', 'tivoli', 'anzio', 'castel gandolfo', 'orvieto',
+            'viterbo', 'latina'] },
+
+  bologna: { base: 65.03, perKm: 1.6083,
+    premiumBase: 85.25, premiumKm: 2.1050,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['bologna', 'bolonha', 'modena', 'ferrara', 'rimini', 'parma',
+            'ravenna', 'riccione', 'cesena', 'forli', 'forlì'] },
+
+  naples: { base: 58.96, perKm: 1.5028,
+    premiumBase: 81.25, premiumKm: 2.1300,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['naples', 'napoli', 'nápoles', 'pompeii', 'pompei', 'sorrento',
+            'salerno', 'amalfi', 'positano', 'ravello', 'caserta',
+            'herculaneum', 'ercolano', 'vesuvio'] },
+
+  palermo: { base: 43.24, perKm: 1.2041,
+    premiumBase: 71.75, premiumKm: 1.9800,
+    van: 1.586, van_sedan: 3.462, two_vans: 3.978,
+    words: ['palermo', 'cefalu', 'cefalù', 'trapani', 'agrigento', 'mondello',
+            'monreale', 'marsala', 'erice', 'sciacca'] },
+
+  // ---------- as quatro sem sedan do lado deles ----------
+
+  venice: { base: 58.93, perKm: 1.5475,
+    premiumBase: 71.50, premiumKm: 1.8550,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['venice', 'venezia', 'veneza', 'mestre', 'piazzale roma', 'padua',
+            'padova', 'verona', 'treviso', 'vicenza', 'lido di jesolo',
+            'jesolo'] },
+
+  florence: { base: 114.54, perKm: 2.3303,
+    premiumBase: 138.25, premiumKm: 2.7900,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['florence', 'firenze', 'florença', 'fiesole', 'siena', 'pisa',
+            'lucca', 'san gimignano', 'arezzo', 'chianti', 'montepulciano',
+            'cortona', 'volterra'] },
+
+  milan: { base: 64.86, perKm: 1.5628,
+    premiumBase: 89.25, premiumKm: 1.8150,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['milan', 'milano', 'milão', 'malpensa', 'linate', 'bergamo',
+            'como', 'lake como', 'lago di como', 'turin', 'torino', 'brescia',
+            'monza', 'varese', 'stresa', 'maggiore'] },
+
+  cagliari: { base: 38.97, perKm: 1.6212,
+    premiumBase: 46.75, premiumKm: 1.9500,
+    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
+    words: ['cagliari', 'villasimius', 'chia', 'oristano', 'pula', 'costa rei',
+            'sardinia', 'sardegna', 'olbia', 'alghero', 'costa smeralda'] }
+};
+
+/**
+ * Roma serve toda a Itália não medida.
+ *
+ * AVISO: Roma é cidade cara. Palermo mostra que o sul corre cerca de
+ * 30% mais barato. Abrir Bari, Catânia ou Lamezia com esta tabela
+ * põe-nos acima do mercado — essas merecem estudo próprio.
+ */
+const IT_FALLBACK = { base: 46.25, perKm: 1.5100,
+  premiumBase: 76.75, premiumKm: 1.9500,
+  van: 1.304, van_sedan: 3.462, two_vans: 3.846 };
+
+/**
+ * Cidades italianas sem tabela própria.
+ *
+ * Servem só para o site reconhecer que a rota é em Itália quando o
+ * país não vem escrito na morada, que é quase sempre.
+ */
+const IT_WORDS = [
+  'italy', 'italia', 'itália', 'genoa', 'genova', 'bari', 'catania',
+  'taormina', 'siracusa', 'syracuse', 'lamezia', 'tropea', 'brindisi',
+  'lecce', 'alberobello', 'matera', 'perugia', 'assisi', 'ancona',
+  'trieste', 'udine', 'bolzano', 'trento', 'garda', 'sirmione',
+  'cinque terre', 'la spezia', 'portofino', 'sanremo', 'capri', 'ischia',
+  'elba', 'livorno', 'grosseto', 'pescara'
+];
+
 /** A zona, pelo texto das moradas. Palavra inteira sempre: "aeroporto"
  *  contém "porto", e sem isso "Aeroporto de Faro" caía na zona do Porto. */
 function detectZone(zones, fallback, pickupText, dropoffText) {
@@ -332,8 +451,19 @@ function detectCountry(pickupText, dropoffText) {
 
   if (/\b(spain|espa(n|ñ)a|espanha)\b/.test(t)) return 'ES';
   if (/\b(portugal)\b/.test(t)) return 'PT';
+  if (/\b(italy|italia|itália)\b/.test(t)) return 'IT';
 
   // Sem o país escrito, decide-se pelas cidades conhecidas.
+  //
+  // A Itália vem ANTES de Espanha por causa de nomes repetidos:
+  // Verona e Como existem nas duas listas de palavras, e Sardenha
+  // tem cidades com nome parecido a espanholas. Sem esta ordem, uma
+  // rota de Milão para Como caía na tabela de Barcelona.
+  for (const z of Object.values(IT_ZONES)) {
+    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'IT';
+  }
+  if (IT_WORDS.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'IT';
+
   for (const z of Object.values(ES_ZONES)) {
     if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'ES';
   }
@@ -381,6 +511,30 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
     const mult = vehicle.id === 'sedan' ? 1 : (zone[vehicle.id] || vehicle.mult);
 
     return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult);
+  }
+
+  if (country === 'IT') {
+    let zoneName = null;
+    const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
+
+    for (const [name, z] of Object.entries(IT_ZONES)) {
+      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
+    }
+
+    const zone = zoneName ? IT_ZONES[zoneName] : IT_FALLBACK;
+    const sedan = zone.base + distanceKm * zone.perKm;
+
+    // O premium tem reta própria: o sedan e o premium deles não
+    // crescem ao mesmo ritmo, e um multiplicador falharia nas
+    // pontas.
+    if (vehicle.id === 'premium') {
+      return Math.max(24, zone.premiumBase + distanceKm * zone.premiumKm);
+    }
+
+    if (vehicle.id === 'sedan') return Math.max(24, sedan);
+
+    // As classes maiores continuam a sair do sedan.
+    return Math.max(24, sedan * (zone[vehicle.id] || vehicle.mult));
   }
 
   if (country === 'PT') {
