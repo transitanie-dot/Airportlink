@@ -1073,6 +1073,31 @@ app.post('/api/create-checkout-session', async (req, res) => {
     });
   }
 
+  /**
+   * O telefone é obrigatório, e a verificação tem de estar AQUI.
+   *
+   * O checkout já o exigia, mas uma reserva chegou sem ele — o que
+   * significa que há outro caminho até esta rota, ou que alguém a
+   * chamou diretamente.
+   *
+   * Sem número, o motorista não tem como avisar que chegou, nem
+   * como encontrar quem espera num aeroporto com três saídas. É a
+   * diferença entre uma viagem e uma reclamação.
+   */
+  const digitos = String(booking.phone_number || booking.passenger_phone || '')
+    .replace(/\D/g, '');
+
+  if (digitos.length < 6) {
+    return res.status(400).json({
+      error: 'A phone number is needed. The driver uses it to reach you on the day.'
+    });
+  }
+
+  // O nome também: o motorista tem de saber por quem espera.
+  if (String(booking.full_name || booking.passenger_name || '').trim().length < 2) {
+    return res.status(400).json({ error: 'A name is needed for the booking.' });
+  }
+
   const passengers = parseInt(booking.passengers, 10) || 1;
   const currency = (booking.currency || 'EUR').toUpperCase();
   const { rates } = await loadExchangeRates();
@@ -2244,6 +2269,37 @@ app.get('/api/agent/statement', async (req, res) => {
   }
 });
 
+/**
+ * O webhook está bem configurado?
+ *
+ * Uma pergunta que hoje só se responde fazendo um pagamento a
+ * sério e vendo o que acontece. Isto responde-a em dois segundos.
+ *
+ * Protegida pelo x-cron-secret: o prefixo de uma chave é pouco,
+ * mas não é nada, e não há razão para o deixar aberto.
+ */
+app.get('/api/stripe-webhook/health', (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const segredos = String(process.env.STRIPE_WEBHOOK_SECRET || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  return res.json({
+    secrets_configured: segredos.length,
+    // Chega para comparar com o que o Stripe mostra, sem revelar
+    // a chave.
+    prefixes: segredos.map((x) => x.slice(0, 12) + '...'),
+    looks_valid: segredos.every((x) => x.startsWith('whsec_')),
+    stripe_key_mode: String(process.env.STRIPE_SECRET_KEY || '').startsWith('sk_live')
+      ? 'live'
+      : 'test'
+  });
+});
+
 app.post('/api/stripe-webhook', async (req, res) => {
   const signature = req.headers['stripe-signature'];
 
@@ -2253,14 +2309,62 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
   let event;
 
-  try {
-    event = await stripe.webhooks.constructEventAsync(
-      req.body,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (error) {
-    return res.status(400).send(`Webhook Error: ${error.message}`);
+  /**
+   * Um segredo por endpoint, e pode haver mais do que um.
+   *
+   * O Stripe assina cada evento com o segredo DO ENDPOINT que o
+   * recebe. Se houver dois — o de teste e o de produção, ou um
+   * criado por engano — cada um tem o seu, e o que está no Render
+   * só valida os eventos de um deles.
+   *
+   * A mensagem "No signatures found matching" diz exatamente isso:
+   * o corpo chegou bem, a assinatura é válida, mas foi feita com
+   * outra chave.
+   *
+   * STRIPE_WEBHOOK_SECRET aceita agora vários separados por
+   * vírgula. Tenta-se cada um até algum bater.
+   */
+  const segredos = String(process.env.STRIPE_WEBHOOK_SECRET || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (!segredos.length) {
+    console.error('Webhook: STRIPE_WEBHOOK_SECRET is not set.');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  let ultimoErro = null;
+
+  for (const segredo of segredos) {
+    try {
+      event = await stripe.webhooks.constructEventAsync(req.body, signature, segredo);
+      break;
+    } catch (error) {
+      ultimoErro = error;
+    }
+  }
+
+  if (!event) {
+    /**
+     * Diagnóstico no registo, não na resposta.
+     *
+     * O Stripe mostra o que respondermos, e uma resposta com
+     * detalhes da chave seria visível a quem tiver acesso ao painel
+     * dele. Nos registos do Render fica só para quem gere o
+     * serviço.
+     */
+    console.error('Webhook signature failed.', {
+      secrets_configured: segredos.length,
+      // Só os primeiros caracteres: chega para confirmar QUAL é
+      // sem o revelar.
+      secret_prefix: segredos.map((x) => x.slice(0, 12)),
+      body_is_buffer: Buffer.isBuffer(req.body),
+      body_length: req.body && req.body.length,
+      error: ultimoErro && ultimoErro.message
+    });
+
+    return res.status(400).send(`Webhook Error: ${ultimoErro && ultimoErro.message}`);
   }
 
   if (event.type === 'checkout.session.completed') {
