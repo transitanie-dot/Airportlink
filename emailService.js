@@ -786,6 +786,85 @@ export async function sendPartnerDecision(partner, decision, reason) {
 }
 
 /** Uma viagem que o parceiro acabou de aceitar. */
+/**
+ * Uma viagem oferecida, com prazo.
+ *
+ * A cascata oferece a um parceiro de cada vez e dá-lhe minutos
+ * para responder. Sem este email, o parceiro não sabe que tem uma
+ * oferta — ela expira sempre, e cada viagem percorre a lista
+ * inteira sem ninguém responder.
+ *
+ * É o email que faz a atribuição automática funcionar de todo.
+ */
+export async function sendRideOffer(partner, booking, offer) {
+  try {
+    const ref = reference(booking);
+    const minutos = offer?.expires_in_minutes || 15;
+
+    /**
+     * Não se diz quanto o cliente pagou.
+     *
+     * O parceiro vê o que RECEBE. A margem é nossa e mostrá-la
+     * convida a conversas que não levam a lado nenhum.
+     */
+    const html = wrap({
+      preheader: `A transfer for ${longDate(booking.booking_date)}. ` +
+        `You have ${minutos} minutes to take it.`,
+
+      heading: 'A transfer for you',
+
+      intro: `This one went to you first${offer?.reason
+        ? ` because you ${offer.reason.split(',')[0]}`
+        : ''}. ` +
+        `Take it within ${minutos} minutes and it is yours. ` +
+        `After that it goes to the next partner.`,
+
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'Vehicle', value: offer?.vehicle_class || '—' },
+          { label: 'You receive', value: money(booking.driver_payout, booking.currency) }
+        ]},
+
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+
+        { type: 'note', text:
+          'The passenger name and phone appear once you take the ride. ' +
+          'Declining costs you nothing — it just passes it on faster. ' +
+          'Ignoring it is what counts against you.' }
+      ],
+
+      cta: {
+        label: 'Open the ride',
+        url: `${SITE}/drivers#ride-${booking.id}`
+      },
+
+      footNote: `Reference ${ref}`
+    });
+
+    /**
+     * A chave inclui o parceiro E a posição na cascata.
+     *
+     * Sem a posição, um parceiro que recebesse a mesma viagem duas
+     * vezes — porque a primeira expirou e a lista deu a volta — não
+     * receberia o segundo email.
+     */
+    return await sendOnce({
+      key: `ride_offer:${ref}:${partner.id}:${offer?.rank || 1}`,
+      template: 'ride_offer',
+      to: partner.email,
+      subject: `Transfer offer — ${longDate(booking.booking_date)} — ${minutos} min to reply`,
+      html
+    });
+  } catch (error) {
+    console.error('sendRideOffer failed:', error);
+    return { ok: false, reason: error.message };
+  }
+}
+
+
 export async function sendRideConfirmedToPartner(partner, booking) {
   try {
     const ref = reference(booking);
