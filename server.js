@@ -1,5 +1,19 @@
 import crypto from 'node:crypto';
 import express from 'express';
+/**
+ * Os avisos no telemóvel.
+ *
+ * O email de operações não serve para o que é urgente: chega a uma
+ * caixa que se lê quando se lê. O Telegram notifica no telemóvel,
+ * é gratuito, e separa vendas de alarmes em dois canais.
+ */
+import {
+  telegramNewBooking,
+  telegramNoDriver,
+  telegramTomorrow,
+  telegramDispute,
+  telegramTest
+} from './telegram.js';
 import cors from 'cors';
 import Stripe from 'stripe';
 // O cliente e as funções de identidade vivem no supabaseclient.js.
@@ -2353,6 +2367,10 @@ async function atribuir(booking) {
      * cobrimos, e isso não se resolve sozinho.
      */
     if (offer?.stage === 'open') {
+      // Este vai com som: é uma venda numa zona que não cobrimos, e
+      // não se resolve sozinha.
+      telegramNewBooking(booking, offer).catch(() => {});
+
       await notifyOps('Booking with no partner in the zone', [
         `Booking: ${booking.booking_reference || booking.id}`,
         `Trip: ${booking.pickup} to ${booking.dropoff}`,
@@ -2368,6 +2386,10 @@ async function atribuir(booking) {
 
   console.log('[assign]', booking.booking_reference,
     '->', offer.partner, '(' + offer.reason + ')');
+
+  // A venda no telemóvel, silenciosa. Ver as vendas a entrar diz
+  // mais sobre o negócio do que qualquer relatório.
+  telegramNewBooking(booking, offer).catch(() => {});
 
   // E avisá-lo.
   const { data: partner } = await supabase
@@ -3004,6 +3026,10 @@ app.post('/api/stripe-webhook', async (req, res) => {
           ? 'DISPUTE OPENED — action needed'
           : `Dispute updated: ${dispute.status}`;
 
+      // No telemóvel também: uma disputa perde-se por omissão, e o
+      // prazo é curto.
+      telegramDispute(booking, dispute, dias).catch(() => {});
+
       await notifyOps(titulo, [
         booking
           ? `Booking: ${booking.booking_reference || booking.id}`
@@ -3557,6 +3583,98 @@ app.post('/api/tasks/monthly-statements', async (req, res) => {
 
   return res.json({ ok: true, ...out });
 });
+
+/**
+ * As viagens sem motorista.
+ *
+ * Corre de dez em dez minutos, não uma vez por dia. Uma venda às
+ * 23h para as 8h da manhã não aparece num resumo das 18h — e às 6h
+ * já é tarde para procurar parceiro.
+ *
+ * A tolerância antes de avisar depende de quanto falta: meia hora
+ * para viagens dentro de 12 horas, seis horas para as de daqui a
+ * semanas. Sem isso, cada venda disparava um alarme antes de a
+ * cascata ter tempo de encontrar alguém.
+ */
+app.post('/api/tasks/driver-watch', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const { data: semMotorista, error } = await supabase
+      .rpc('bookings_needing_driver');
+
+    if (error) throw error;
+
+    const lista = semMotorista || [];
+
+    if (!lista.length) {
+      return res.json({ ok: true, alerts: 0 });
+    }
+
+    await telegramNoDriver(lista);
+
+    /**
+     * Marcar depois de avisar.
+     *
+     * Uma reserva avisada não volta a disparar. Se voltasse, uma
+     * viagem sem motorista durante três dias mandaria um alarme de
+     * dez em dez minutos — e ao fim de uma hora ninguém os lê.
+     */
+    for (const b of lista) {
+      await supabase.rpc('mark_no_driver_alerted', { p_booking_id: b.booking_id });
+    }
+
+    return res.json({
+      ok: true,
+      alerts: lista.length,
+      critical: lista.filter((b) => b.urgency === 'critical').length
+    });
+  } catch (error) {
+    console.error('driver-watch:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * O resumo do dia seguinte, ao fim da tarde.
+ *
+ * Não é um alarme — os alarmes já dispararam quando havia razão.
+ * É o que se lê para saber se se pode fechar o portátil.
+ */
+app.post('/api/tasks/tomorrow-summary', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const { data } = await supabase.rpc('tomorrow_summary');
+
+    await telegramTomorrow(data);
+
+    return res.json({ ok: true, ...(data || {}) });
+  } catch (error) {
+    console.error('tomorrow-summary:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Confirmar que o Telegram está ligado. */
+app.get('/api/tasks/telegram-test', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const result = await telegramTest();
+  return res.json(result);
+});
+
 
 app.post('/api/tasks/daily-emails', async (req, res) => {
   if (!process.env.CRON_SECRET) {
