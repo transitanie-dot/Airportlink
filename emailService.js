@@ -865,6 +865,170 @@ export async function sendRideOffer(partner, booking, offer) {
 }
 
 
+/**
+ * Um empurrão a meio do prazo.
+ *
+ * A coisa que mais reduz o ignorar, e a mais barata. Um parceiro
+ * que não respondeu ao primeiro email muitas vezes não o viu — não
+ * é que não queira a viagem.
+ *
+ * Um só por oferta: dois lembretes em quinze minutos são spam, e
+ * ensinam a ignorar os dois.
+ */
+/**
+ * O lembrete ao cliente, 24 horas antes.
+ *
+ * Alguém que reservou há três semanas não recebe nada até o
+ * motorista aparecer. Esse silêncio é o que gera as chamadas de
+ * "confirmam que está tudo bem?" — e a ansiedade de quem chega a
+ * um país estrangeiro de madrugada.
+ *
+ * Também é a última oportunidade de apanhar um erro: uma morada
+ * errada, um voo mudado, um número de telefone que já não serve.
+ */
+export async function sendTripReminder(booking, driver) {
+  try {
+    const ref = reference(booking);
+
+    /**
+     * O motorista, se já estiver escolhido.
+     *
+     * Quando está, o lembrete vale o dobro: saber o nome e a
+     * matrícula antes de chegar tira a parte pior de uma chegada
+     * nocturna.
+     */
+    const temMotorista = Boolean(driver?.name || booking.manual_driver_name);
+
+    const nome = driver?.name || booking.manual_driver_name;
+    const telefone = driver?.phone || booking.manual_driver_phone;
+    const carro = driver?.vehicle || booking.manual_vehicle;
+    const matricula = driver?.plate || booking.manual_vehicle_plate;
+
+    const html = wrap({
+      preheader: `Your transfer is tomorrow at ${shortTime(booking.booking_time)}.`,
+
+      heading: 'Your transfer is tomorrow',
+
+      intro: temMotorista
+        ? 'Everything is set. Here is who is picking you up and where to find them.'
+        : 'Everything is set. We send your driver\'s name and plate the evening ' +
+          'before, so keep an eye out for that one.',
+
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'Flight', value: booking.flight_number },
+          { label: 'Reference', value: ref }
+        ]},
+
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+
+        ...(temMotorista ? [{ type: 'facts', items: [
+          { label: 'Driver', value: nome },
+          { label: 'Phone', value: telefone },
+          { label: 'Vehicle', value: carro },
+          { label: 'Plate', value: matricula }
+        ]}] : []),
+
+        /**
+         * O que fazer se alguma coisa mudou.
+         *
+         * É a razão de este email existir a 24 horas e não a 2: dá
+         * tempo de corrigir. Um voo que mudou descoberto na véspera
+         * resolve-se; descoberto no dia, não.
+         */
+        { type: 'note', text:
+          'Flight changed? Different address? Reply to this email and we ' +
+          'move it — there is still time. After midnight tonight it gets ' +
+          'harder, and on the day it may not be possible.' }
+      ],
+
+      cta: {
+        label: 'See your booking',
+        url: `${SITE}/myaccount`
+      },
+
+      footNote: booking.pickup && booking.pickup.toLowerCase().includes('airport')
+        ? 'Your driver tracks the flight. A delay is not a problem — they wait.'
+        : null
+    });
+
+    return await sendOnce({
+      key: `trip_reminder:${ref}`,
+      template: 'trip_reminder',
+      to: booking.email,
+      bookingId: booking.id,
+      subject: `Tomorrow at ${shortTime(booking.booking_time)} — your transfer`,
+      html
+    });
+  } catch (error) {
+    console.error('sendTripReminder failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
+export async function sendRideOfferReminder(partner, booking, offer) {
+  try {
+    const ref = reference(booking);
+    const minutos = offer?.minutes_left || 5;
+
+    const html = wrap({
+      preheader: `${minutos} minutes left on that transfer.`,
+
+      heading: `${minutos} minutes left`,
+
+      intro: 'This one is still yours if you want it. After that it goes ' +
+        'to the next partner and you will not see it again.',
+
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Date', value: longDate(booking.booking_date) },
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'You receive', value: money(booking.driver_payout, booking.currency) }
+        ]},
+
+        { type: 'route', from: booking.pickup, to: booking.dropoff },
+
+        /**
+         * Dizer o que fazer se não quiser.
+         *
+         * Um parceiro que ignora muitas vezes prefere não recusar
+         * formalmente. Dizer-lhe que recusar não custa nada é o que
+         * transforma um ignorar num não — que serve toda a gente,
+         * porque passa a viagem ao seguinte mais depressa.
+         */
+        { type: 'note', text:
+          'Cannot do this one? Decline it — it costs you nothing and gets ' +
+          'it to somebody else faster. Letting it run out is the only thing ' +
+          'that counts against you.' }
+      ],
+
+      cta: {
+        label: 'Take it or pass',
+        url: `${SITE}/drivers#ride-${booking.id}`
+      },
+
+      footNote: `Reference ${ref}`
+    });
+
+    return await sendOnce({
+      key: `ride_offer_reminder:${ref}:${partner.id}:${offer?.rank || 1}`,
+      template: 'ride_offer_reminder',
+      to: partner.email,
+      subject: `${minutos} min left — transfer on ${longDate(booking.booking_date)}`,
+      html
+    });
+  } catch (error) {
+    console.error('sendRideOfferReminder failed:', error);
+    return { ok: false, reason: error.message };
+  }
+}
+
+
 export async function sendRideConfirmedToPartner(partner, booking) {
   try {
     const ref = reference(booking);
