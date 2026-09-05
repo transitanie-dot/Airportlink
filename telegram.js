@@ -185,37 +185,74 @@ export async function telegramNoDriver(bookings) {
 
 
 /**
- * O resumo do dia seguinte.
+ * O resumo do dia, à meia-noite.
  *
- * Ao fim da tarde, para se saber se se pode fechar o portátil. Não
- * é um alarme: os alarmes já dispararam quando havia razão.
+ * Duas coisas diferentes que se confundem: o que ENTROU hoje
+ * (vendas) e o que se FEZ hoje (viagens operadas). Uma reserva
+ * pode entrar hoje para daqui a três semanas, e uma viagem de hoje
+ * pode ter sido vendida em agosto.
+ *
+ * Vai para o canal de vendas, silencioso — à meia-noite ninguém
+ * precisa de acordar com isto. Só toca se amanhã ficar alguma
+ * coisa por resolver.
  */
-export async function telegramTomorrow(summary) {
-  const s = summary || {};
+export async function telegramDaySummary(s) {
+  if (!s) return { sent: false, reason: 'nothing' };
 
-  const linhas = [
-    `*Tomorrow* · ${esc(s.date)}`,
-    '',
-    `${esc(s.total || 0)} transfer${s.total === 1 ? '' : 's'}`,
-    `${esc(s.with_driver || 0)} with a driver`
-  ];
+  const linhas = [`*${esc(s.date)}*`, ''];
 
-  if (s.without_driver > 0) {
-    linhas.push(`⚠️ *${esc(s.without_driver)} still without*`);
+  // ---------- o que entrou ----------
+  if (s.new_bookings > 0) {
+    linhas.push(
+      `📥 *${esc(s.new_bookings)} new booking${s.new_bookings === 1 ? '' : 's'}* ` +
+      `· ${esc(Number(s.revenue || 0).toFixed(2))} EUR`
+    );
+  } else {
+    linhas.push('📥 No bookings today');
+  }
+
+  // ---------- o que se fez ----------
+  if (s.trips_today > 0) {
     linhas.push('');
+    linhas.push(`🚗 *${esc(s.trips_today)} transfer${s.trips_today === 1 ? '' : 's'} today*`);
 
-    for (const u of (s.unassigned || []).slice(0, 6)) {
-      linhas.push(`· ${esc(u.time)} ${esc(u.from)} → ${esc(u.to)} (${esc(u.pax)} pax)`);
+    const partes = [];
+    if (s.completed) partes.push(`${s.completed} completed`);
+    if (s.cancelled) partes.push(`${s.cancelled} cancelled`);
+    if (s.no_driver) partes.push(`${s.no_driver} with no driver`);
+
+    if (partes.length) linhas.push(`   ${esc(partes.join(' · '))}`);
+
+    /**
+     * O custo dos táxis, quando houve.
+     *
+     * É a margem que se perdeu por não ter cobertura, e o número
+     * que diz onde recrutar — melhor do que qualquer previsão,
+     * porque é dinheiro que já saiu.
+     */
+    if (s.used_taxi > 0) {
+      linhas.push(
+        `   💸 ${esc(s.used_taxi)} needed a taxi · ` +
+        `${esc(Number(s.taxi_cost || 0).toFixed(2))} EUR out of pocket`
+      );
     }
-  } else if (s.total > 0) {
-    linhas.push('', 'Everything covered.');
   }
 
-  if (s.first_pickup) {
-    linhas.push('', `First pick\\-up: ${esc(s.first_pickup)}`);
+  // ---------- amanhã ----------
+  if (s.tomorrow_total > 0) {
+    linhas.push('');
+    linhas.push(
+      `📅 Tomorrow: ${esc(s.tomorrow_total)} transfer` +
+      `${s.tomorrow_total === 1 ? '' : 's'}` +
+      (s.tomorrow_without_driver > 0
+        ? `, *${esc(s.tomorrow_without_driver)} still without a driver*`
+        : ', all covered')
+    );
   }
 
-  return send(ALERTS, linhas.join('\n'), { silent: s.without_driver === 0 });
+  return send(SALES, linhas.join('\n'), {
+    silent: !(s.tomorrow_without_driver > 0)
+  });
 }
 
 
