@@ -20,6 +20,8 @@ import {
   sendChargeSucceeded,
   sendChargeFailed,
   sendRideOffer,
+  sendRideOfferReminder,
+  sendTripReminder,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -3154,6 +3156,9 @@ const INTERNAL_TEMPLATES = {
   // cascata avança. Sem ela, só o primeiro parceiro de cada viagem
   // era avisado.
   ride_offer: (p) => sendRideOffer(p.partner, p.booking, p.offer),
+  // O empurrão a meio do prazo. É o que mais reduz o ignorar.
+  ride_offer_reminder: (p) =>
+    sendRideOfferReminder(p.partner, p.booking, p.offer),
   // O link de confirmação só pode ser gerado aqui: é este serviço
   // que tem o cliente com service_role.
   verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
@@ -3562,7 +3567,7 @@ app.post('/api/tasks/daily-emails', async (req, res) => {
   }
 
   const out = {
-    driver_details: 0, held: 0, no_driver: 0,
+    driver_details: 0, held: 0, no_driver: 0, reminders: 0,
     expiring: 0, expired: 0, unclaimed: 0, errors: []
   };
 
@@ -3597,6 +3602,76 @@ app.post('/api/tasks/daily-emails', async (req, res) => {
     }
   } catch (error) {
     out.errors.push('driver_details: ' + error.message);
+  }
+
+  // ---------- 1b. o lembrete ao cliente, 24 horas antes ----------
+  //
+  // Quem reservou há três semanas não recebe nada até o motorista
+  // aparecer. Esse silêncio é o que gera as chamadas de "confirmam
+  // que está tudo bem?".
+  //
+  // E é a última oportunidade de apanhar um erro: uma morada
+  // errada, um voo mudado, um telefone que já não serve.
+  try {
+    const { data: amanha } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('booking_date', day(1))
+      .neq('status', 'cancelled')
+      .is('reminder_sent_at', null);
+
+    for (const b of (amanha || [])) {
+      if (!b.email) continue;
+
+      /**
+       * O motorista, se já estiver escolhido.
+       *
+       * Com ele, o lembrete vale o dobro: saber o nome e a
+       * matrícula antes de chegar tira a parte pior de uma chegada
+       * nocturna. Sem ele, o email diz que virá depois.
+       */
+      let driver = null;
+
+      if (b.assigned_driver_id) {
+        const { data: d } = await supabase
+          .from('drivers')
+          .select('full_name, phone')
+          .eq('id', b.assigned_driver_id)
+          .maybeSingle();
+
+        const { data: v } = b.assigned_vehicle_id
+          ? await supabase
+              .from('partner_vehicles')
+              .select('make, model, plate')
+              .eq('id', b.assigned_vehicle_id)
+              .maybeSingle()
+          : { data: null };
+
+        if (d) {
+          driver = {
+            name: d.full_name,
+            phone: d.phone,
+            vehicle: v ? `${v.make} ${v.model}` : null,
+            plate: v?.plate
+          };
+        }
+      }
+
+      const result = await sendTripReminder(b, driver);
+
+      if (result.sent) {
+        out.reminders = (out.reminders || 0) + 1;
+
+        // Marcar depois de enviar. Se o email falhar, a passagem de
+        // amanhã tenta outra vez — e amanhã já é o dia da viagem,
+        // por isso é a última hipótese.
+        await supabase.from('bookings')
+          .update({ reminder_sent_at: new Date().toISOString() })
+          .eq('id', b.id);
+      }
+    }
+  } catch (error) {
+    out.errors.push('reminders: ' + error.message);
   }
 
   // ---------- 2. documentos a expirar ----------
