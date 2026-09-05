@@ -19,6 +19,7 @@ import {
   sendCardSaved,
   sendChargeSucceeded,
   sendChargeFailed,
+  sendRideOffer,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -2300,6 +2301,81 @@ app.get('/api/stripe-webhook/health', (req, res) => {
   });
 });
 
+/**
+ * A atribuição automática de uma reserva.
+ *
+ * Três passos: repartir em carros, oferecer ao primeiro da lista,
+ * e avisá-lo por email.
+ *
+ * O terceiro é o que faz os outros dois servirem para alguma
+ * coisa: sem email, o parceiro não sabe que tem uma oferta e ela
+ * expira sempre.
+ */
+async function atribuir(booking) {
+  /**
+   * Repartir primeiro.
+   *
+   * Uma reserva de onze pessoas são dois carros, e podem ser de
+   * parceiros diferentes. Sem isto, procurava-se um parceiro que
+   * cobrisse os onze sozinho — e na maioria das zonas não há
+   * nenhum.
+   */
+  try {
+    const { data: split } = await supabase.rpc('split_booking', {
+      p_booking_id: booking.id
+    });
+
+    if (split?.segments?.length > 1) {
+      console.log('[assign]', booking.booking_reference,
+        'split into', split.segments.length, 'vehicles');
+    }
+  } catch (e) {
+    console.error('[assign] split failed:', e.message);
+  }
+
+  // Oferecer ao primeiro da cascata.
+  const { data: offer, error } = await supabase.rpc('offer_next_partner', {
+    p_booking_id: booking.id,
+    p_class: null
+  });
+
+  if (error) throw error;
+
+  if (!offer?.partner_id) {
+    /**
+     * Ninguém na zona. A viagem fica no quadro aberto e as
+     * operações têm de saber — é uma venda numa zona que não
+     * cobrimos, e isso não se resolve sozinho.
+     */
+    if (offer?.stage === 'open') {
+      await notifyOps('Booking with no partner in the zone', [
+        `Booking: ${booking.booking_reference || booking.id}`,
+        `Trip: ${booking.pickup} to ${booking.dropoff}`,
+        `Date: ${booking.booking_date}`,
+        `Passengers: ${booking.passengers}`,
+        '',
+        'Nobody covers this zone with the right vehicle. It is on the ' +
+        'open board, but somebody should look at recruiting there.'
+      ]);
+    }
+    return;
+  }
+
+  console.log('[assign]', booking.booking_reference,
+    '->', offer.partner, '(' + offer.reason + ')');
+
+  // E avisá-lo.
+  const { data: partner } = await supabase
+    .from('driver_partners')
+    .select('id, email, trading_name, legal_name')
+    .eq('id', offer.partner_id)
+    .maybeSingle();
+
+  if (partner?.email) {
+    await sendRideOffer(partner, booking, offer);
+  }
+}
+
 app.post('/api/stripe-webhook', async (req, res) => {
   const signature = req.headers['stripe-signature'];
 
@@ -2550,14 +2626,8 @@ app.post('/api/stripe-webhook', async (req, res) => {
      * que ficaram sem oferta.
      */
     if (savedBooking && !upsertError) {
-      supabase.rpc('offer_next_partner', { p_booking_id: savedBooking.id })
-        .then(({ data }) => {
-          if (data && data.partner) {
-            console.log('[assign]', savedBooking.booking_reference,
-              '->', data.partner, '(' + data.reason + ')');
-          }
-        })
-        .catch((e) => console.error('[assign] offer failed:', e.message));
+      atribuir(savedBooking).catch((e) =>
+        console.error('[assign] failed:', e.message));
     }
 
     if (upsertError) {
@@ -3074,6 +3144,10 @@ const INTERNAL_TEMPLATES = {
   partner_received: (p) => sendPartnerApplicationReceived(p.partner),
   partner_decision: (p) => sendPartnerDecision(p.partner, p.decision, p.reason),
   ride_confirmed: (p) => sendRideConfirmedToPartner(p.partner, p.booking),
+  // A oferta com prazo, mandada pelo serviço de drivers quando a
+  // cascata avança. Sem ela, só o primeiro parceiro de cada viagem
+  // era avisado.
+  ride_offer: (p) => sendRideOffer(p.partner, p.booking, p.offer),
   // O link de confirmação só pode ser gerado aqui: é este serviço
   // que tem o cliente com service_role.
   verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
