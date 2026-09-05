@@ -1219,6 +1219,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
     phone: fullPhone,
     currency,
     notes: booking.notes || '',
+    // O idioma preferido, se o disseram. Vai na metadata do Stripe
+    // porque é de lá que a reserva é montada no webhook.
+    preferred_language: booking.preferred_language || '',
     flight_number: booking.flight_number || booking.flightNumber || '',
     pickup: booking.pickup || '',
     dropoff: booking.dropoff || '',
@@ -2596,6 +2599,9 @@ app.post('/api/stripe-webhook', async (req, res) => {
       payment_method_type: charge?.payment_method_details?.type || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      // Vazio conta como sem preferência: um campo opcional que
+      // ninguém preencheu não deve ficar como string vazia.
+      preferred_language: metadata.preferred_language || null,
       email:
         metadata.email ||
         session.customer_details?.email ||
