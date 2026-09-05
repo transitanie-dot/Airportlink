@@ -112,30 +112,132 @@ async function send(chatId, text, options = {}) {
  * relatório.
  */
 export async function telegramNewBooking(booking, assignment) {
+  /**
+   * O valor em EUROS, não em cêntimos.
+   *
+   * O amount_total vem do Stripe em cêntimos — 16336 são 163,36 €.
+   * Mostrá-lo cru dava "163366.00 EUR", um número absurdo que faz
+   * duvidar de tudo o resto na mensagem.
+   *
+   * O price é o valor já em euros, e é o que se mostra. O
+   * amount_total só serve de reserva, dividido por cem.
+   */
+  const valor = booking.price != null
+    ? Number(booking.price)
+    : (booking.amount_total != null ? Number(booking.amount_total) / 100 : null);
+
+  const moeda = String(booking.currency || 'EUR').toUpperCase();
+
+  /**
+   * Pago agora ou pago depois.
+   *
+   * Muda o que temos de fazer: um pay-later é cobrado 48 horas
+   * antes, e se o cartão falhar aí é preciso alguém falar com o
+   * cliente.
+   */
+  const pagou = booking.amount_total != null || booking.payment_status === 'paid';
+
+  /**
+   * A classe de viatura.
+   *
+   * Nem sempre está na reserva: vem da metadata do Stripe e alguns
+   * caminhos não a preenchem. Sem ela, deriva-se dos passageiros —
+   * a mesma regra do site, para os números baterem.
+   */
+  const pax = Number(booking.passengers) || 1;
+
+  const chave = booking.vehicle_class ||
+    (pax <= 3 ? 'sedan' : pax <= 4 ? 'premium' : pax <= 8 ? 'van'
+      : pax <= 13 ? 'van_sedan' : 'two_vans');
+
+  const classe = {
+    sedan: 'Sedan',
+    premium: 'Premium sedan',
+    van: 'Van',
+    van_sedan: 'Van + sedan',
+    two_vans: 'Two vans'
+  }[chave] || chave;
+
+  /**
+   * Quando a reserva entrou.
+   *
+   * Diferente da data da viagem, e as duas confundem-se. Uma
+   * reserva feita agora para daqui a três semanas e uma feita
+   * ontem para amanhã pedem coisas diferentes — a segunda tem
+   * pressa.
+   *
+   * A hora é a do Recife, que é onde estás. O created_at vem em
+   * UTC — três horas à frente — e mostrá-lo cru faria uma reserva
+   * das 21h aparecer como meia-noite do dia seguinte.
+   */
+  const quando = booking.created_at
+    ? new Date(booking.created_at).toLocaleString('en-GB', {
+        timeZone: 'America/Recife',
+        day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit'
+      })
+    : null;
+
   const linhas = [
     '*New booking*',
+    ...(quando ? [esc('booked ' + quando)] : []),
     '',
-    `${esc(booking.pickup)} → ${esc(booking.dropoff)}`,
-    `${esc(booking.booking_date)} at ${esc(booking.booking_time)}`,
-    `${esc(booking.passengers)} passenger${booking.passengers === 1 ? '' : 's'}` +
-      ` · ${esc(Number(booking.amount_total || 0).toFixed(2))} ` +
-      esc(String(booking.currency || 'EUR').toUpperCase()),
-    ''
+
+    // ---------- quem ----------
+    `*${esc(booking.full_name || booking.passenger_name || 'No name')}*`,
+    esc(booking.email || ''),
+    esc(booking.passenger_phone || booking.phone_number || 'no phone'),
+    '',
+
+    // ---------- a viagem ----------
+    `📍 ${esc(booking.pickup)}`,
+    `🏁 ${esc(booking.dropoff)}`,
+    '',
+
+    /**
+     * A data da VIAGEM, não a de hoje.
+     *
+     * Mostrava o created_at, e por isso uma reserva feita ontem
+     * para daqui a três semanas aparecia com a data de hoje. A
+     * data que interessa é quando o carro tem de estar lá.
+     */
+    `📅 ${esc(booking.booking_date)} at ${esc(booking.booking_time || '—')}`,
+    `👥 ${esc(booking.passengers)} passenger${booking.passengers === 1 ? '' : 's'}` +
+      ` · ${esc(classe)}`,
+    '',
+
+    // ---------- o dinheiro ----------
+    `💶 *${esc(valor != null ? valor.toFixed(2) : '?')} ${esc(moeda)}*` +
+      ` · ${pagou ? 'paid now' : 'pay later'}`
   ];
+
+  if (booking.flight_number) {
+    linhas.push(`✈️ ${esc(booking.flight_number)}`);
+  }
+
+  if (booking.preferred_language) {
+    linhas.push(`🗣 prefers ${esc(booking.preferred_language)}`);
+  }
+
+  linhas.push('');
 
   /**
    * A quem foi oferecida, se a cascata já correu.
    *
-   * É a informação que diz se há problema. "Offered to X" é
-   * normal; "nobody in the zone" é o que interessa ver.
+   * "Offered to X" é normal. "Nobody in the zone" é o que interessa
+   * ver, porque é uma venda que não temos como servir.
    */
   if (assignment?.partner) {
-    linhas.push(`Offered to ${esc(assignment.partner)}`);
+    linhas.push(`→ Offered to *${esc(assignment.partner)}*`);
   } else if (assignment?.stage === 'open') {
     linhas.push('⚠️ *Nobody in the zone* — on the open board');
   }
 
-  linhas.push('', `\`${esc(booking.booking_reference || booking.id)}\``);
+  // A referência, se já foi gerada. Nos primeiros segundos pode
+  // ainda não estar — o id serve na mesma para a procurar.
+  const ref = booking.booking_reference || booking.booking_id || booking.id;
+
+  if (ref) linhas.push('', `\`${esc(ref)}\``);
 
   return send(SALES, linhas.join('\n'), { silent: true });
 }
