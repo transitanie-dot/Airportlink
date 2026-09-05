@@ -2668,6 +2668,287 @@ app.post('/api/stripe-webhook', async (req, res) => {
     }
   }
 
+  // ============================================================
+  // OS OUTROS EVENTOS
+  //
+  // O webhook só tratava o checkout.session.completed. Faltavam os
+  // três que custam dinheiro: um pagamento que falha depois de
+  // aprovado, um reembolso feito no painel do Stripe, e uma disputa
+  // — que é perdida por omissão se ninguém responder em sete dias.
+  // ============================================================
+
+  /**
+   * Já tratámos este evento?
+   *
+   * O Stripe reenvia até receber 200. Se a nossa resposta se perder
+   * na rede, ele volta — e sem esta verificação um reembolso de 50
+   * euros era registado duas vezes.
+   */
+  const jaTratado = async (extra = {}) => {
+    try {
+      const { data } = await supabase.rpc('payment_event_seen', {
+        p_event_id: event.id,
+        p_type: event.type,
+        p_booking_id: extra.booking_id || null,
+        p_intent: extra.intent || null,
+        p_amount: extra.amount != null ? extra.amount / 100 : null,
+        p_currency: extra.currency || null,
+        p_payload: event.data.object
+      });
+
+      return data === true;
+    } catch (e) {
+      // Falhar aqui não deve travar o tratamento: repetir um
+      // reembolso no registo é menos grave do que ignorar uma
+      // disputa.
+      console.error('[webhook] seen check failed:', e.message);
+      return false;
+    }
+  };
+
+  const marcarFeito = (erro) =>
+    supabase.rpc('payment_event_done', {
+      p_event_id: event.id,
+      p_error: erro || null
+    }).catch(() => {});
+
+  /** A reserva a que este pagamento pertence. */
+  const reservaDoIntent = async (intentId) => {
+    if (!intentId) return null;
+
+    const { data } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('stripe_payment_intent_id', intentId)
+      .maybeSingle();
+
+    return data;
+  };
+
+  // ---------- pagamento falhado ----------
+  if (event.type === 'payment_intent.payment_failed') {
+    const intent = event.data.object;
+    const booking = await reservaDoIntent(intent.id);
+
+    if (await jaTratado({
+      booking_id: booking?.id,
+      intent: intent.id,
+      amount: intent.amount,
+      currency: intent.currency
+    })) {
+      return res.json({ received: true, duplicate: true });
+    }
+
+    try {
+      const motivo = intent.last_payment_error?.message || 'The payment was declined.';
+
+      if (booking) {
+        await supabase.from('bookings').update({
+          payment_status: 'failed',
+          last_charge_error: motivo,
+          updated_at: new Date().toISOString()
+        }).eq('id', booking.id);
+
+        /**
+         * O cliente tem de saber, e depressa.
+         *
+         * Um pagamento que falha silenciosamente é uma viagem que
+         * ninguém vai fazer — e o cliente só descobre no aeroporto.
+         */
+        try {
+          /**
+           * O sendChargeFailed espera { attempt, willRetry }.
+           *
+           * Este caminho é diferente do charge-due: aqui o Stripe
+           * já recusou, e não há tentativa automática a seguir — o
+           * cliente tem de vir mudar o cartão.
+           */
+          await sendChargeFailed(booking, { attempt: 1, willRetry: false });
+        } catch (e) {
+          console.error('[webhook] charge-failed email:', e.message);
+        }
+      }
+
+      await notifyOps('Payment failed', [
+        `Intent: ${intent.id}`,
+        booking
+          ? `Booking: ${booking.booking_reference || booking.id}`
+          : 'No booking found for this intent.',
+        `Amount: ${(intent.amount / 100).toFixed(2)} ${String(intent.currency).toUpperCase()}`,
+        `Reason: ${motivo}`
+      ]);
+
+      await marcarFeito();
+    } catch (e) {
+      await marcarFeito(e.message);
+      console.error('[webhook] payment_failed:', e.message);
+    }
+
+    return res.json({ received: true });
+  }
+
+  // ---------- reembolso ----------
+  if (event.type === 'charge.refunded') {
+    const charge = event.data.object;
+    const booking = await reservaDoIntent(charge.payment_intent);
+
+    if (await jaTratado({
+      booking_id: booking?.id,
+      intent: charge.payment_intent,
+      amount: charge.amount_refunded,
+      currency: charge.currency
+    })) {
+      return res.json({ received: true, duplicate: true });
+    }
+
+    try {
+      const devolvido = charge.amount_refunded / 100;
+      const total = charge.amount / 100;
+      const parcial = charge.amount_refunded < charge.amount;
+
+      if (booking) {
+        /**
+         * Um reembolso pode vir do painel do Stripe, sem passar por
+         * aqui. Sem este evento, a reserva ficava "paga" na nossa
+         * base e reembolsada no Stripe — e os números deixavam de
+         * bater sem ninguém perceber porquê.
+         */
+        await supabase.from('bookings').update({
+          refunded_amount: devolvido,
+          refunded_at: new Date().toISOString(),
+          payment_status: parcial ? 'partially_refunded' : 'refunded',
+          // Um reembolso total cancela a viagem. Um parcial não:
+          // pode ser um desconto acordado depois da reserva.
+          status: parcial ? booking.status : 'cancelled',
+          updated_at: new Date().toISOString()
+        }).eq('id', booking.id);
+      }
+
+      await notifyOps(parcial ? 'Partial refund' : 'Refund', [
+        booking
+          ? `Booking: ${booking.booking_reference || booking.id}`
+          : 'No booking found.',
+        `Refunded: ${devolvido.toFixed(2)} of ${total.toFixed(2)} ` +
+          String(charge.currency).toUpperCase(),
+        booking && parcial ? 'The booking is still active.' : '',
+        'Made in the Stripe dashboard or by our own refund route.'
+      ].filter(Boolean));
+
+      await marcarFeito();
+    } catch (e) {
+      await marcarFeito(e.message);
+      console.error('[webhook] charge.refunded:', e.message);
+    }
+
+    return res.json({ received: true });
+  }
+
+  // ---------- disputa ----------
+  if (event.type === 'charge.dispute.created' ||
+      event.type === 'charge.dispute.updated' ||
+      event.type === 'charge.dispute.closed') {
+    const dispute = event.data.object;
+    const booking = await reservaDoIntent(dispute.payment_intent);
+
+    if (await jaTratado({
+      booking_id: booking?.id,
+      intent: dispute.payment_intent,
+      amount: dispute.amount,
+      currency: dispute.currency
+    })) {
+      return res.json({ received: true, duplicate: true });
+    }
+
+    try {
+      // O prazo vem em segundos desde 1970.
+      const prazo = dispute.evidence_details?.due_by
+        ? new Date(dispute.evidence_details.due_by * 1000)
+        : null;
+
+      const aberta = event.type === 'charge.dispute.created';
+      const fechada = event.type === 'charge.dispute.closed';
+
+      if (booking) {
+        await supabase.from('bookings').update({
+          dispute_status: dispute.status,
+          dispute_reason: dispute.reason,
+          dispute_amount: dispute.amount / 100,
+          dispute_due_by: prazo ? prazo.toISOString() : null,
+          dispute_opened_at: aberta
+            ? new Date().toISOString()
+            : booking.dispute_opened_at,
+          updated_at: new Date().toISOString()
+        }).eq('id', booking.id);
+      }
+
+      /**
+       * Uma disputa é o evento mais caro que existe.
+       *
+       * O Stripe dá um prazo para responder com provas. Passado sem
+       * resposta, perde-se por omissão — e além do valor da viagem
+       * cobram uma taxa de disputa que ronda os 15 euros.
+       *
+       * Por isso o email é diferente dos outros: diz o prazo em
+       * dias, e diz o que fazer.
+       */
+      const dias = prazo
+        ? Math.max(0, Math.ceil((prazo - Date.now()) / 86400000))
+        : null;
+
+      const titulo = fechada
+        ? `Dispute ${dispute.status}`
+        : aberta
+          ? 'DISPUTE OPENED — action needed'
+          : `Dispute updated: ${dispute.status}`;
+
+      await notifyOps(titulo, [
+        booking
+          ? `Booking: ${booking.booking_reference || booking.id}`
+          : 'No booking found for this charge.',
+        booking ? `Customer: ${booking.full_name} (${booking.email})` : '',
+        booking ? `Trip: ${booking.pickup} to ${booking.dropoff} on ${booking.booking_date}` : '',
+        `Amount: ${(dispute.amount / 100).toFixed(2)} ${String(dispute.currency).toUpperCase()}`,
+        `Reason given: ${dispute.reason}`,
+        `Status: ${dispute.status}`,
+        '',
+        fechada
+          ? (dispute.status === 'won'
+              ? 'We kept the money.'
+              : 'The money is gone, plus the dispute fee.')
+          : dias != null
+            ? `RESPOND WITHIN ${dias} DAY${dias === 1 ? '' : 'S'}. ` +
+              'Without a reply the dispute is lost by default, and the ' +
+              'dispute fee is charged on top of the amount.'
+            : 'Check the deadline in the Stripe dashboard.',
+        '',
+        aberta
+          ? 'Evidence to send: the booking confirmation email, the driver ' +
+            'assignment, and anything showing the trip happened.'
+          : '',
+        `https://dashboard.stripe.com/disputes/${dispute.id}`
+      ].filter(Boolean));
+
+      await marcarFeito();
+    } catch (e) {
+      await marcarFeito(e.message);
+      console.error('[webhook] dispute:', e.message);
+    }
+
+    return res.json({ received: true });
+  }
+
+  /**
+   * Os que não tratamos ficam registados na mesma.
+   *
+   * Quando um dia alguém perguntar "porque é que este pagamento
+   * está assim", o registo responde — mesmo para eventos que nunca
+   * chegámos a programar.
+   */
+  if (event.type !== 'checkout.session.completed') {
+    await jaTratado().catch(() => {});
+    await marcarFeito();
+  }
+
   return res.json({ received: true });
 });
 
