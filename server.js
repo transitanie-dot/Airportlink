@@ -10,9 +10,9 @@ import express from 'express';
 import {
   telegramNewBooking,
   telegramNoDriver,
-  telegramTomorrow,
   telegramDispute,
-  telegramTest
+  telegramTest,
+  telegramDaySummary
 } from './telegram.js';
 import cors from 'cors';
 import Stripe from 'stripe';
@@ -3642,30 +3642,33 @@ app.post('/api/tasks/driver-watch', async (req, res) => {
 
 
 /**
- * O resumo do dia seguinte, ao fim da tarde.
+ * O resumo do dia, à meia-noite.
+ *
+ * Duas coisas diferentes que se confundem: o que ENTROU hoje
+ * (vendas) e o que se FEZ hoje (viagens operadas). Uma reserva
+ * pode entrar hoje para daqui a três semanas, e uma viagem de hoje
+ * pode ter sido vendida em agosto.
  *
  * Não é um alarme — os alarmes já dispararam quando havia razão.
- * É o que se lê para saber se se pode fechar o portátil.
  */
-app.post('/api/tasks/tomorrow-summary', async (req, res) => {
+app.post('/api/tasks/day-summary', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
   try {
-    const { data } = await supabase.rpc('tomorrow_summary');
+    const { data } = await supabase.rpc('day_summary', { p_day: null });
 
-    await telegramTomorrow(data);
+    await telegramDaySummary(data);
 
     return res.json({ ok: true, ...(data || {}) });
   } catch (error) {
-    console.error('tomorrow-summary:', error);
+    console.error('day-summary:', error);
     return res.status(500).json({ error: error.message });
   }
 });
 
 
-/** Confirmar que o Telegram está ligado. */
 app.get('/api/tasks/telegram-test', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
