@@ -2535,6 +2535,31 @@ app.post('/api/stripe-webhook', async (req, res) => {
       .select()
       .single();
 
+    /**
+     * A cascata arranca aqui.
+     *
+     * A viagem é oferecida a UM parceiro de cada vez, começando
+     * pelo que tem mais em comum com o cliente — o idioma primeiro,
+     * depois a taxa de conclusão.
+     *
+     * Se ninguém aceitar, vai ao quadro aberto, que é o que existia
+     * antes disto.
+     *
+     * Sem esperar pela resposta: uma falha aqui não deve impedir a
+     * confirmação de chegar ao cliente. O cron apanha as reservas
+     * que ficaram sem oferta.
+     */
+    if (savedBooking && !upsertError) {
+      supabase.rpc('offer_next_partner', { p_booking_id: savedBooking.id })
+        .then(({ data }) => {
+          if (data && data.partner) {
+            console.log('[assign]', savedBooking.booking_reference,
+              '->', data.partner, '(' + data.reason + ')');
+          }
+        })
+        .catch((e) => console.error('[assign] offer failed:', e.message));
+    }
+
     if (upsertError) {
       console.error('Supabase upsert error:', upsertError);
 
