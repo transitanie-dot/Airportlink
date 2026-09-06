@@ -14,6 +14,14 @@ import {
   telegramTest,
   telegramDaySummary
 } from './telegram.js';
+/**
+ * As viagens na agenda.
+ *
+ * Turquesa sem motorista, azul escuro com. A cor muda sozinha
+ * quando a cascata encontra parceiro — o calendário conta a
+ * história sem ninguém lhe tocar.
+ */
+import { calendarUpsert, calendarCancel, calendarTest } from './calendar.js';
 import cors from 'cors';
 import Stripe from 'stripe';
 // O cliente e as funções de identidade vivem no supabaseclient.js.
@@ -1663,6 +1671,11 @@ app.post('/api/cancel-booking', async (req, res) => {
 
       await sendCancellation(booking, { refunded: false, amount: 0 });
 
+    // E na agenda passa a cinzento. Apagar o evento faria a
+    // reserva desaparecer sem rasto — e saber que houve um
+    // cancelamento naquele dia é informação.
+    calendarCancel(booking).catch(() => {});
+
       return res.json({ success: true, refunded: false, charged: false });
     }
 
@@ -2401,6 +2414,14 @@ async function atribuir(booking) {
   if (partner?.email) {
     await sendRideOffer(partner, booking, offer);
   }
+
+  /**
+   * O evento na agenda, turquesa.
+   *
+   * Ainda sem motorista: a oferta foi feita mas ninguém aceitou. A
+   * cor muda para azul quando aceitarem.
+   */
+  calendarUpsert(booking).catch(() => {});
 }
 
 app.post('/api/stripe-webhook', async (req, res) => {
@@ -3666,6 +3687,59 @@ app.post('/api/tasks/day-summary', async (req, res) => {
     console.error('day-summary:', error);
     return res.status(500).json({ error: error.message });
   }
+});
+
+
+/**
+ * O motorista aceitou: a viagem passa a azul na agenda.
+ *
+ * Chamada pelo serviço de drivers. O calendário vive aqui porque é
+ * aqui que estão as credenciais do Google — o outro serviço só
+ * avisa.
+ */
+app.post('/api/internal/calendar-sync', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id, partner_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    const { data: partner } = partner_id
+      ? await supabase
+          .from('driver_partners')
+          .select('trading_name, legal_name')
+          .eq('id', partner_id)
+          .maybeSingle()
+      : { data: null };
+
+    const result = await calendarUpsert(booking, partner);
+
+    return res.json(result);
+  } catch (error) {
+    console.error('calendar-sync:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Confirmar que o calendário está ligado. */
+app.get('/api/tasks/calendar-test', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const result = await calendarTest();
+  return res.json(result);
 });
 
 
