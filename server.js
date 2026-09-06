@@ -56,6 +56,7 @@ import {
   sendAgentStatement,
   notifyOps
 } from './emailService.js';
+import { createShared } from './support-shared.js';
 import { createPartnerRoutes } from './partners.js';
 
 const app = express();
@@ -825,12 +826,49 @@ app.get('/', (req, res) => {
 
 // Rede de parceiros de motoristas. Vive em partners.js para este
 // ficheiro não crescer sem fim; as dependências vão por parâmetro.
+/**
+ * O portal de motoristas também vive aqui.
+ *
+ * O mesmo módulo é montado nos dois serviços: aqui, para quem
+ * chega pelo site principal, e no serviço de drivers, para quem
+ * chega pelo subdomínio.
+ *
+ * O shared tem de existir — o partners.js espera as peças
+ * partilhadas (asUser, chatFor) e sem elas rebenta na primeira
+ * chamada.
+ */
+/**
+ * As peças partilhadas.
+ *
+ * O partners.js foi separado em três — o portal, o call centre e
+ * o que ambos usam. Aqui só se monta o portal, mas ele precisa do
+ * shared na mesma.
+ */
+const sharedPeças = createShared({
+  supabase,
+  getUserFromRequest,
+  email: {
+    sendPartnerApplicationReceived,
+    sendPartnerDecision,
+    sendRideConfirmedToPartner,
+    sendRideOffer,
+    sendRideOfferReminder
+  },
+  config: {
+    defaultCountry: process.env.DEFAULT_PARTNER_COUNTRY || 'PT'
+  }
+});
+
 app.use(createPartnerRoutes({
   supabase,
   getUserFromRequest,
   requireAdmin,
+  shared: sharedPeças,
   config: {
-    defaultCountry: process.env.DEFAULT_PARTNER_COUNTRY || 'PT'
+    defaultCountry: process.env.DEFAULT_PARTNER_COUNTRY || 'PT',
+    // O calendário vive neste serviço, por isso o aviso é local.
+    apiUrl: process.env.MAIN_API_URL || '',
+    cronSecret: process.env.CRON_SECRET
   }
 }));
 
