@@ -44,6 +44,7 @@ import {
   sendRideOffer,
   sendRideOfferReminder,
   sendTripReminder,
+  sendDriverArrived,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -3765,6 +3766,82 @@ app.post('/api/internal/calendar-sync', async (req, res) => {
     return res.json(result);
   } catch (error) {
     console.error('calendar-sync:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * O motorista chegou: avisar o cliente.
+ *
+ * Chamada pelo portal de motoristas. O email vive aqui porque é
+ * aqui que estão as credenciais do Resend.
+ */
+app.post('/api/internal/driver-arrived', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    /**
+     * Os dados do motorista, se estiverem atribuídos.
+     *
+     * Muitos parceiros pequenos não registam motoristas — são eles
+     * próprios que conduzem. Nesse caso o email diz só que o carro
+     * chegou, e isso chega.
+     */
+    let driver = null;
+
+    if (booking.assigned_driver_id) {
+      const [{ data: d }, { data: v }] = await Promise.all([
+        supabase.from('drivers')
+          .select('full_name, phone')
+          .eq('id', booking.assigned_driver_id)
+          .maybeSingle(),
+
+        booking.assigned_vehicle_id
+          ? supabase.from('partner_vehicles')
+              .select('make, model, plate')
+              .eq('id', booking.assigned_vehicle_id)
+              .maybeSingle()
+          : Promise.resolve({ data: null })
+      ]);
+
+      if (d) {
+        driver = {
+          name: d.full_name,
+          phone: d.phone,
+          vehicle: v ? `${v.make} ${v.model}` : null,
+          plate: v?.plate
+        };
+      }
+    }
+
+    if (!driver && booking.manual_driver_name) {
+      driver = {
+        name: booking.manual_driver_name,
+        phone: booking.manual_driver_phone,
+        vehicle: booking.manual_vehicle,
+        plate: booking.manual_vehicle_plate
+      };
+    }
+
+    const result = await sendDriverArrived(booking, driver);
+
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('driver-arrived:', error);
     return res.status(500).json({ error: error.message });
   }
 });
