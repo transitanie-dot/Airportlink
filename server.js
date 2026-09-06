@@ -3770,14 +3770,68 @@ app.post('/api/internal/calendar-sync', async (req, res) => {
 });
 
 
-/** Confirmar que o calendário está ligado. */
+/**
+ * Confirmar que o calendário está ligado.
+ *
+ * Com ?keep=1 o evento fica, para se ver como aparece de verdade:
+ * o título, as cores, os lembretes. Sem isso apaga-se logo, que é
+ * o certo para um teste automático.
+ */
 app.get('/api/tasks/calendar-test', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  const result = await calendarTest();
-  return res.json(result);
+  const ficar = req.query.keep === '1';
+
+  if (!ficar) {
+    return res.json(await calendarTest());
+  }
+
+  /**
+   * Um evento de exemplo, com dados a sério.
+   *
+   * Um teste que só diz "funciona" não mostra nada. Este cria uma
+   * reserva plausível para amanhã e deixa-a lá, para se ver o
+   * título na vista de mês, a cor, e o que a descrição leva.
+   */
+  const amanha = new Date();
+  amanha.setDate(amanha.getDate() + 1);
+
+  const exemplo = {
+    id: 'test-' + Date.now(),
+    booking_reference: 'TEST-001',
+    booking_date: amanha.toISOString().slice(0, 10),
+    booking_time: '14:30',
+    duration_minutes: 45,
+
+    full_name: 'Test Passenger',
+    email: 'test@example.com',
+    passenger_phone: '+351 912 345 678',
+
+    pickup: 'Faro Airport, 8006-901 Faro, Portugal',
+    dropoff: 'Albufeira, Portugal',
+    passengers: 3,
+    vehicle_class: 'sedan',
+    flight_number: 'TP1234',
+    preferred_language: 'pt',
+
+    price: 55,
+    currency: 'EUR',
+    amount_total: 5500,
+    notes: 'This is a test event. Delete it when you have seen it.',
+
+    status: 'confirmed'
+  };
+
+  const result = await calendarUpsert(exemplo);
+
+  return res.json({
+    ...result,
+    kept: true,
+    note: 'A test event was created for tomorrow at 14:30. Turquoise, ' +
+      'because it has no driver. Delete it by hand when you have seen it.'
+  });
 });
 
 
