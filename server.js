@@ -4105,6 +4105,16 @@ app.post('/api/tasks/charge-due', async (req, res) => {
         results.charged += 1;
         console.log('Scheduled charge succeeded:', booking.booking_id || booking.id);
         await sendChargeSucceeded(booking);
+
+        /**
+         * O cadeado fecha na agenda.
+         *
+         * Um pay-later que já foi cobrado não é diferente de um
+         * pago à cabeça — e o título tem de o dizer, senão o
+         * calendário mente sobre o que ainda está por receber.
+         */
+        calendarUpsert({ ...booking, amount_total: Math.round(Number(booking.price || 0) * 100) })
+          .catch(() => {});
       } catch (error) {
         const code = error.code || error.decline_code || 'unknown';
         const needsCustomer = code === 'authentication_required';
