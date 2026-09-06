@@ -3772,6 +3772,120 @@ app.post('/api/internal/calendar-sync', async (req, res) => {
 
 
 /**
+ * Cobrar a espera, no cartão que já está guardado.
+ *
+ * Chamada quando o cliente aceita, no momento do código. Ele está
+ * ali, viu o valor, e concordou — não é uma surpresa no extrato.
+ *
+ * Se falhar, a viagem começa na mesma. Um cliente deixado no
+ * aeroporto por causa de quinze euros é uma disputa e uma avaliação
+ * de uma estrela; a dívida resolve-se depois, com calma.
+ */
+app.post('/api/internal/charge-extra', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    if (!booking.extra_amount || booking.extra_charged_at) {
+      return res.json({ ok: true, skipped: true });
+    }
+
+    /**
+     * Sem cartão guardado não há como cobrar.
+     *
+     * Acontece nos que pagaram à cabeça: o Stripe não guarda o
+     * método a menos que se peça. Fica registado como dívida e o
+     * apoio resolve — não vale a pena pedir o cartão ao cliente no
+     * passeio.
+     */
+    if (!booking.stripe_payment_method_id || !booking.stripe_customer_id) {
+      await supabase.from('bookings').update({
+        extra_charge_failed: 'no_saved_card',
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      await notifyOps('Waiting charge could not be taken', [
+        `Booking: ${booking.booking_reference || booking.id}`,
+        `Customer: ${booking.full_name} (${booking.email})`,
+        `Amount: ${Number(booking.extra_amount).toFixed(2)} ${booking.currency || 'EUR'}`,
+        `Waiting: ${booking.extra_minutes} minutes past the free time`,
+        '',
+        'No saved card. The passenger accepted the charge — somebody ' +
+        'should follow up.'
+      ]);
+
+      return res.json({ ok: false, reason: 'no_saved_card' });
+    }
+
+    const currency = booking.currency || 'EUR';
+    const amount = toStripeAmount(Number(booking.extra_amount), currency);
+
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: currency.toLowerCase(),
+      customer: booking.stripe_customer_id,
+      payment_method: booking.stripe_payment_method_id,
+      off_session: true,
+      confirm: true,
+      description: `Waiting time — ${booking.booking_reference || booking.id}`,
+      metadata: {
+        booking_id: String(booking.id),
+        kind: 'waiting_time',
+        minutes: String(booking.extra_minutes || 0)
+      }
+    });
+
+    await supabase.from('bookings').update({
+      extra_charged_at: new Date().toISOString(),
+      extra_charge_failed: null,
+      updated_at: new Date().toISOString()
+    }).eq('id', booking_id);
+
+    console.log('[extra] charged', booking.booking_reference,
+      Number(booking.extra_amount).toFixed(2), currency);
+
+    return res.json({ ok: true, intent: intent.id });
+  } catch (error) {
+    /**
+     * O cartão recusou.
+     *
+     * Sem saldo, banco a bloquear por ser estrangeiro, cartão
+     * expirado entre a reserva e a viagem. Fica registado e as
+     * operações são avisadas.
+     */
+    console.error('[extra] charge failed:', error.message);
+
+    await supabase.from('bookings').update({
+      extra_charge_failed: error.message,
+      updated_at: new Date().toISOString()
+    }).eq('id', booking_id).catch(() => {});
+
+    await notifyOps('Waiting charge declined', [
+      `Booking: ${booking_id}`,
+      `Reason: ${error.message}`,
+      '',
+      'The passenger accepted the charge and the trip went ahead. ' +
+      'Somebody should follow up.'
+    ]).catch(() => {});
+
+    return res.json({ ok: false, reason: error.message });
+  }
+});
+
+
+/**
  * O motorista chegou: avisar o cliente.
  *
  * Chamada pelo portal de motoristas. O email vive aqui porque é
