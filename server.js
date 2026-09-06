@@ -1428,7 +1428,23 @@ app.post('/api/create-checkout-session', async (req, res) => {
         cancel_url: `${SITE_ORIGIN}/?cancel=true`,
         customer_email: booking.email,
         metadata,
-        payment_intent_data: { metadata }
+
+        /**
+         * Guardar o cartão, mesmo quem paga à cabeça.
+         *
+         * Sem isto, o Stripe descarta o método de pagamento assim
+         * que a cobrança passa — e a espera no aeroporto ficava sem
+         * como ser cobrada à maioria dos clientes.
+         *
+         * O checkout diz o que isto significa, ao pé do botão de
+         * pagar. É o que a Uber, os hotéis e as rent-a-car fazem, e
+         * o cliente já espera.
+         */
+        customer_creation: 'always',
+        payment_intent_data: {
+          metadata,
+          setup_future_usage: 'off_session'
+        }
       });
     }
 
@@ -2550,6 +2566,28 @@ app.post('/api/stripe-webhook', async (req, res) => {
           : si.payment_method?.id || null;
       } catch (error) {
         console.error('SetupIntent retrieve error:', error);
+      }
+    }
+
+    /**
+     * E nos pagamentos à cabeça.
+     *
+     * O setup_future_usage no checkout diz ao Stripe para guardar o
+     * cartão, mas o id do método só se sabe indo buscá-lo ao
+     * payment_intent depois de a cobrança passar.
+     *
+     * Sem isto, a espera no aeroporto ficava sem como ser cobrada à
+     * maioria dos clientes — e a maioria paga à cabeça.
+     */
+    if (!payLater && typeof session.payment_intent === 'string') {
+      try {
+        const pi = await stripe.paymentIntents.retrieve(session.payment_intent);
+
+        savedPaymentMethod = typeof pi.payment_method === 'string'
+          ? pi.payment_method
+          : pi.payment_method?.id || null;
+      } catch (e) {
+        console.error('[webhook] could not read payment method:', e.message);
       }
     }
 
