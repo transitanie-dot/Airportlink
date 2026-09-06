@@ -886,6 +886,65 @@ export async function sendRideOffer(partner, booking, offer) {
  * Também é a última oportunidade de apanhar um erro: uma morada
  * errada, um voo mudado, um número de telefone que já não serve.
  */
+/**
+ * O motorista chegou.
+ *
+ * A etapa que mais reduz chamadas: "onde está o meu motorista?"
+ * deixa de fazer sentido quando ele já avisou.
+ *
+ * Curto de propósito. É lido num aeroporto, com bagagem numa mão e
+ * o telemóvel na outra — só o que faz falta para o encontrar.
+ */
+export async function sendDriverArrived(booking, driver) {
+  try {
+    const ref = reference(booking);
+
+    const html = wrap({
+      preheader: 'Your driver is here.',
+      heading: 'Your driver has arrived',
+
+      intro: driver?.name
+        ? `${driver.name} is waiting for you.`
+        : 'Your driver is waiting for you.',
+
+      blocks: [
+        { type: 'facts', items: [
+          { label: 'Driver', value: driver?.name },
+          { label: 'Phone', value: driver?.phone },
+          { label: 'Vehicle', value: driver?.vehicle },
+          { label: 'Plate', value: driver?.plate }
+        ]},
+
+        /**
+         * O código, outra vez.
+         *
+         * Já foi no lembrete de 24 horas, mas esse email tem um dia
+         * e está enterrado na caixa. Aqui está à mão, no momento em
+         * que faz falta.
+         */
+        { type: 'note', text:
+          `Your pick-up code is ${booking.pickup_code}. ` +
+          'Give it to the driver — it is how we confirm the trip happened.' }
+      ],
+
+      footNote: `Reference ${ref}`
+    });
+
+    return await sendOnce({
+      key: `driver_arrived:${ref}`,
+      template: 'driver_arrived',
+      to: booking.email,
+      bookingId: booking.id,
+      subject: 'Your driver is here',
+      html
+    });
+  } catch (error) {
+    console.error('sendDriverArrived failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendTripReminder(booking, driver) {
   try {
     const ref = reference(booking);
@@ -939,6 +998,21 @@ export async function sendTripReminder(booking, driver) {
          * tempo de corrigir. Um voo que mudou descoberto na véspera
          * resolve-se; descoberto no dia, não.
          */
+        /**
+         * O código de recolha.
+         *
+         * O motorista pede-o à chegada. Serve para duas coisas: o
+         * cliente saber que é o carro certo, e nós termos prova de
+         * que a viagem aconteceu.
+         *
+         * Numa disputa, um código que só o cliente tinha e o
+         * motorista escreveu no local é a prova mais forte que
+         * existe — porque o testemunho é dele, não nosso.
+         */
+        ...(booking.pickup_code ? [{ type: 'note', text:
+          `Your pick-up code is ${booking.pickup_code}. The driver will ask ` +
+          'for it. Do not give it to anyone else.' }] : []),
+
         { type: 'note', text:
           'Flight changed? Different address? Reply to this email and we ' +
           'move it — there is still time. After midnight tonight it gets ' +
