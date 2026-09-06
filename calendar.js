@@ -50,9 +50,9 @@ const ligado = Boolean(CLIENT_ID && CLIENT_SECRET && REFRESH_TOKEN && CALENDAR_I
  * azul escuro é a 9 (Blueberry). Os números não mudam.
  */
 const COR = {
-  sem_motorista: '7',   // turquesa
-  com_motorista: '9',   // azul escuro
-  cancelada: '8'        // cinzento
+  sem_motorista: '7',   // turquesa (Peacock)
+  com_motorista: '9',   // azul escuro (Blueberry)
+  cancelada: '11'       // vermelho (Tomato)
 };
 
 /**
@@ -221,11 +221,35 @@ function corpo(booking, partner) {
    * carro, para onde vai, e se tem motorista — e é isso que aqui
    * está, por essa ordem de importância.
    */
+  /**
+   * Pago agora ou pago depois.
+   *
+   * A cor já está a dizer duas coisas — se tem motorista, e se foi
+   * cancelada. Uma terceira não cabe: onze cores num calendário
+   * deixam de significar nada.
+   *
+   * Um símbolo no início resolve, e lê-se na vista de mês sem
+   * abrir nada. O aberto é uma conta por fechar; o fechado é
+   * dinheiro que já entrou.
+   */
+  const pago = booking.amount_total != null || booking.payment_status === 'paid';
+
+  const cancelada = booking.status === 'cancelled';
+
+  // O símbolo cola-se ao carro: um ponto entre eles seria ruído
+  // numa linha que já tem três.
+  const marca = cancelada
+    ? 'CANCELLED'
+    : `${pago ? '🔒' : '🔓'} ${CARRO[chave] || chave}`;
+
   const titulo = [
-    CARRO[chave] || chave,
+    marca,
+    cancelada ? (CARRO[chave] || chave) : null,
     `${de} → ${para}`,
     `${pax}p`,
-    temMotorista ? (partner?.trading_name || 'assigned') : 'NO DRIVER'
+    cancelada
+      ? null
+      : (temMotorista ? (partner?.trading_name || 'assigned') : 'NO DRIVER')
   ].filter(Boolean).join(' · ');
 
   const linhas = [
