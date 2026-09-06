@@ -1,98 +1,52 @@
 /**
- * partners.js — backend da rede de parceiros de motoristas
+ * partners.js — o portal de motoristas
  * ---------------------------------------------------------------
- * Tudo o que diz respeito a empresas de motoristas vive aqui: o
- * registo, os documentos, a frota, as zonas, a agenda e a revisão
- * pelo administrador.
+ * Tudo o que uma empresa de motoristas faz na conta dela: o
+ * registo, os documentos, a frota, as zonas, a agenda e o chat com
+ * o apoio.
+ *
+ * O que o CALL CENTRE faz — as filas, os estados de agente, as
+ * métricas — mudou para o support.js. Estava aqui porque o
+ * requireAdmin já cá vivia, e o ficheiro chegou a 87 KB com 53
+ * rotas de dois sistemas diferentes.
  *
  * As dependências entram por parâmetro em vez de serem importadas.
- * Assim este módulo não sabe nada sobre como o servidor foi montado,
- * e pode ser testado sozinho.
+ * Assim este módulo não sabe nada sobre como o servidor está
+ * montado.
  * ---------------------------------------------------------------
  */
 
 import { Router } from 'express';
 
+
 export function createPartnerRoutes({
   supabase,
   getUserFromRequest,
   requireAdmin,
+  // As peças partilhadas com o call centre. Vêm de fora para as
+  // duas metades usarem a MESMA instância — duas cópias do chatFor
+  // seriam duas verdades sobre o que é uma conversa.
+  shared,
   email = {},
   config = {}
 }) {
   if (!supabase) throw new Error('createPartnerRoutes: supabase is required');
-  if (!getUserFromRequest) throw new Error('createPartnerRoutes: getUserFromRequest is required');
-  if (!requireAdmin) throw new Error('createPartnerRoutes: requireAdmin is required');
+  if (!shared) throw new Error('createPartnerRoutes: shared is required');
 
-  // As funções de email vêm por injeção, não por import: o
-  // emailService vive no outro serviço, e importá-lo daqui obrigaria
-  // a manter duas cópias. Sem elas o portal funciona na mesma —
-  // apenas não avisa ninguém.
-  const notify = {
-    received: email.sendPartnerApplicationReceived || (async () => {}),
-    decision: email.sendPartnerDecision || (async () => {}),
-    ride: email.sendRideConfirmedToPartner || (async () => {})
-  };
+  const {
+    notify,
+    asUser,
+    ensurePartnerRow,
+    loadPartnerState,
+    chatFor,
+    historyFor
+  } = shared;
+
+  const DEFAULT_COUNTRY = config.defaultCountry || 'PT';
+  const PARTNER_EDITABLE_STATUSES = ['draft', 'rejected', 'verified', 'approved'];
 
   const router = Router();
 
-  /**
-   * Os requisitos do país do parceiro. Se ainda não tivermos uma
-   * lista para esse país, devolvemos a genérica ('GEN') em vez de
-   * nada — um parceiro em Itália tem de conseguir candidatar-se
-   * antes de nós termos mapeado a legislação italiana.
-   */
-  function requirementsFor(all, country) {
-    const local = all.filter((r) => r.country === country);
-    return local.length ? local : all.filter((r) => r.country === 'GEN');
-  }
-
-  // ============================================================
-  // REDE DE PARCEIROS DE MOTORISTAS
-  //
-  // Modelo Blacklane: o parceiro é uma EMPRESA licenciada. Ela traz os
-  // seus motoristas e veículos, e é responsável pela conformidade de
-  // cada um. Nada aqui é escrito pelo browser — o estado da
-  // candidatura, a aprovação de documentos e a atribuição de viagens
-  // passam todos por este servidor.
-  // ============================================================
-
-  const DEFAULT_COUNTRY = config.defaultCountry || 'PT';
-
-  // Estados em que o parceiro ainda pode editar a ficha da empresa.
-  // Durante a revisão fecha: senão alguém trocava a empresa por baixo
-  // de uma candidatura já submetida.
-  const PARTNER_EDITABLE_STATUSES = ['draft', 'rejected', 'verified', 'approved'];
-
-  async function loadPartnerState(userId) {
-    const [partner, zones, drivers, vehicles, documents, requirements, allZones, compliance, airports] =
-      await Promise.all([
-        supabase.from('driver_partners').select('*').eq('id', userId).maybeSingle(),
-        supabase.from('partner_zones').select('zone_code').eq('partner_id', userId),
-        supabase.from('drivers').select('*').eq('partner_id', userId).neq('status', 'removed').order('created_at'),
-        supabase.from('partner_vehicles').select('*').eq('partner_id', userId).neq('status', 'removed').order('created_at'),
-        supabase.from('compliance_documents').select('*').eq('partner_id', userId).order('uploaded_at', { ascending: false }),
-        supabase.from('document_requirements').select('*').eq('active', true).order('sort_order'),
-        supabase.from('service_zones').select('*').eq('active', true).order('sort_order'),
-        supabase.from('partner_compliance').select('*').eq('partner_id', userId).maybeSingle(),
-        supabase.from('airports').select('*').eq('active', true).order('city')
-      ]);
-
-    const country = partner.data?.country || DEFAULT_COUNTRY;
-    const allRequirements = requirements.data || [];
-
-    return {
-      partner: partner.data || null,
-      zones: (zones.data || []).map((z) => z.zone_code),
-      drivers: drivers.data || [],
-      vehicles: vehicles.data || [],
-      documents: documents.data || [],
-      requirements: requirementsFor(allRequirements, country),
-      serviceZones: allZones.data || [],
-      airports: airports.data || [],
-      compliance: compliance.data || null
-    };
-  }
 
   /**
    * Registo completo: conta e empresa numa só chamada.
@@ -119,10 +73,14 @@ export function createPartnerRoutes({
         });
       }
 
+      // Ao contrário dos clientes, aqui a confirmação é exigida. Um
+      // parceiro vai ter acesso a dados de passageiros e a receber
+      // dinheiro, e ninguém está a meio de uma compra ao registar-se
+      // — o atrito custa pouco e vale a pena.
       const { data: authData, error: authError } = await supabase.auth.admin.createUser({
         email: b.email,
         password: b.password,
-        email_confirm: true,
+        email_confirm: false,
         user_metadata: { full_name: b.contact_name, partner: true }
       });
 
@@ -176,7 +134,14 @@ export function createPartnerRoutes({
 
       console.log('Partner signed up:', { email: b.email, country: b.country });
 
-      return res.json({ success: true });
+      await notify.verify(b.email, b.contact_name, 'partner');
+
+      return res.json({
+        success: true,
+        // O portal precisa de saber que não pode entrar já: com
+        // email_confirm a false, o signInWithPassword é recusado.
+        verification_required: true
+      });
     } catch (error) {
       console.error('partner/signup error:', error);
 
@@ -197,6 +162,14 @@ export function createPartnerRoutes({
       });
     }
   });
+
+  // ============================================================
+  // QUADRO DE VIAGENS
+  //
+  // O parceiro vê as viagens por atribuir dos aeroportos que serve, e
+  // pega a que quiser. A corrida entre dois parceiros é resolvida
+  // dentro do claim_ride, no Postgres — não aqui.
+  // ============================================================
 
   // ============================================================
   // QUADRO DE VIAGENS
@@ -226,8 +199,58 @@ export function createPartnerRoutes({
       if (available.error) throw available.error;
       if (mine.error) throw mine.error;
 
+      /**
+       * As ofertas dirigidas a mim, com o tempo que falta.
+       *
+       * Uma viagem oferecida é diferente de uma no quadro aberto:
+       * tem prazo, e é minha durante esse tempo. Sem isto, o portal
+       * mostrava as duas iguais e o parceiro não sabia que tinha
+       * minutos contados.
+       */
+      const { data: ofertas } = await supabase
+        .from('ride_offers')
+        .select('booking_id, expires_at, match_reason, rank')
+        .eq('partner_id', user.id)
+        .eq('outcome', 'pending')
+        .gt('expires_at', new Date().toISOString());
+
+      const porReserva = {};
+
+      (ofertas || []).forEach((o) => {
+        porReserva[o.booking_id] = {
+          minutes_left: Math.max(1,
+            Math.round((new Date(o.expires_at) - Date.now()) / 60000)),
+          reason: o.match_reason,
+          rank: o.rank
+        };
+      });
+
+      // As ofertas aparecem na lista de disponíveis, marcadas.
+      const disponiveis = (available.data || []).map((r) => ({
+        ...r,
+        offer: porReserva[r.id] || null
+      }));
+
+      // E as que só existem como oferta — ainda não estão no quadro
+      // aberto — entram na mesma lista.
+      const jaListadas = new Set(disponiveis.map((r) => r.id));
+      const soOferta = Object.keys(porReserva).filter((id) => !jaListadas.has(id));
+
+      if (soOferta.length) {
+        const { data: extra } = await supabase
+          .from('bookings')
+          .select('*')
+          .in('id', soOferta);
+
+        (extra || []).forEach((r) => {
+          disponiveis.unshift({ ...r, offer: porReserva[r.id] });
+        });
+      }
+
       return res.json({
-        available: available.data || [],
+        // As ofertas primeiro: são as que têm relógio a correr.
+        available: disponiveis.sort((a, b) =>
+          (b.offer ? 1 : 0) - (a.offer ? 1 : 0)),
         mine: mine.data || [],
         airports: partner.data?.operating_airports || [],
         ready: partner.data?.status === 'approved' && Boolean(partner.data?.payout_iban)
@@ -237,6 +260,7 @@ export function createPartnerRoutes({
       return res.status(500).json({ error: 'Could not load the ride board.' });
     }
   });
+
 
   router.post('/api/partner/rides/claim', async (req, res) => {
     try {
@@ -319,6 +343,166 @@ export function createPartnerRoutes({
     }
   });
 
+
+  /**
+   * Aceitar uma viagem oferecida.
+   *
+   * Diferente do claim: aquele é o quadro aberto, este é a oferta
+   * dirigida. Aceita se tiver oferta válida OU se a viagem já
+   * passou ao quadro aberto — que é o que acontece quando ninguém
+   * da cascata a quis.
+   */
+  /**
+   * Dizer à API principal que a viagem tem motorista.
+   *
+   * O calendário vive lá — é onde estão as credenciais do Google.
+   * Este serviço só avisa; a API trata do resto.
+   */
+  async function avisarCalendario(bookingId, partnerId) {
+    if (!config.apiUrl || !config.cronSecret) return;
+
+    try {
+      await fetch(config.apiUrl + '/api/internal/calendar-sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cron-secret': config.cronSecret
+        },
+        body: JSON.stringify({ booking_id: bookingId, partner_id: partnerId })
+      });
+    } catch (e) {
+      // Uma falha aqui não desfaz a aceitação. O evento fica
+      // turquesa até alguém reparar, e isso é um problema de cor,
+      // não de operação.
+      console.error('calendar sync:', e.message);
+    }
+  }
+
+  router.post('/api/partner/rides/accept', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+      const { booking_id } = req.body || {};
+      if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+      const { data, error } = await asUser(req).rpc('accept_ride_offer', {
+        p_booking_id: booking_id
+      });
+
+      if (error) throw error;
+
+      if (data && data.ok === false) {
+        const mensagens = {
+          already_taken: 'Somebody else took this one.',
+          not_offered: 'This ride is not open to you.'
+        };
+        return res.status(409).json({ error: mensagens[data.reason] || 'Could not accept.' });
+      }
+
+      /**
+       * A viagem passa a azul escuro na agenda.
+       *
+       * É o que faz o calendário contar a história sem ninguém lhe
+       * tocar: turquesa é uma viagem por resolver, azul é uma
+       * resolvida. Um mês visto de relance diz onde faltou
+       * cobertura.
+       *
+       * Sem esperar pela resposta: o parceiro já aceitou e não deve
+       * ficar à espera do Google.
+       */
+      avisarCalendario(booking_id, user.id).catch(() => {});
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('rides/accept:', error);
+      return res.status(500).json({ error: 'Could not accept the ride.' });
+    }
+  });
+
+  /**
+   * Recusar, com motivo opcional.
+   *
+   * Recusar NÃO penaliza. Se penalizasse, ensinávamos os parceiros
+   * a aceitar tudo e a cancelar depois — muito pior para o cliente.
+   *
+   * O que conta contra é ignorar, e isso mede-se sozinho.
+   */
+  router.post('/api/partner/rides/decline', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+      const { booking_id, reason } = req.body || {};
+      if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+      const { data, error } = await asUser(req).rpc('decline_ride_offer', {
+        p_booking_id: booking_id,
+        p_reason: reason || null
+      });
+
+      if (error) throw error;
+
+      if (data && data.ok === false) {
+        return res.status(409).json({ error: 'That offer is no longer open.' });
+      }
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('rides/decline:', error);
+      return res.status(500).json({ error: 'Could not decline the ride.' });
+    }
+  });
+
+  /**
+   * Como estou a portar-me.
+   *
+   * A taxa de conclusão e a de resposta, com o semáforo. Um número
+   * que o parceiro vê muda o comportamento dele; escondido, não
+   * muda nada.
+   */
+  /**
+   * As últimas dez ofertas, e quantas ignorei.
+   *
+   * "Ignoraste 3 das últimas 10" muda mais o comportamento do que
+   * qualquer penalização — e sem ensinar ninguém a aceitar tudo
+   * para depois cancelar.
+   *
+   * Dez e não noventa dias: um número que se pode corrigir esta
+   * semana move mais do que um que demora três meses a mudar.
+   */
+  router.get('/api/partner/recent-offers', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+      const { data } = await asUser(req).rpc('partner_recent_offers', {
+        p_partner_id: user.id
+      });
+
+      return res.json(data || { show: false });
+    } catch (error) {
+      return res.json({ show: false });
+    }
+  });
+
+  router.get('/api/partner/standing', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+      const { data } = await supabase
+        .from('partner_reputation')
+        .select('*')
+        .eq('partner_id', user.id)
+        .maybeSingle();
+
+      return res.json(data || { standing: 'new', completion_rate: 100, response_rate: 100 });
+    } catch (error) {
+      return res.json({ standing: 'new' });
+    }
+  });
+
   router.post('/api/partner/rides/release', async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
@@ -369,10 +553,16 @@ export function createPartnerRoutes({
     }
   });
 
+
   router.get('/api/partner/me', async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
       if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+      // A porta de entrada do portal. Se a linha de empresa faltar,
+      // é aqui que se repara — antes de qualquer outra coisa falhar
+      // por causa dela.
+      await ensurePartnerRow(user);
 
       const state = await loadPartnerState(user.id);
 
@@ -386,6 +576,8 @@ export function createPartnerRoutes({
       return res.status(500).json({ error: 'Could not load your partner account.' });
     }
   });
+
+  // Dados da empresa. Cria o registo em rascunho na primeira gravação.
 
   // Dados da empresa. Cria o registo em rascunho na primeira gravação.
   router.post('/api/partner/company', async (req, res) => {
@@ -461,6 +653,7 @@ export function createPartnerRoutes({
     }
   });
 
+
   router.post('/api/partner/zones', async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
@@ -482,6 +675,7 @@ export function createPartnerRoutes({
       return res.status(500).json({ error: 'Could not save your service zones.' });
     }
   });
+
 
   router.post('/api/partner/driver', async (req, res) => {
     try {
@@ -518,6 +712,7 @@ export function createPartnerRoutes({
       return res.status(500).json({ error: 'Could not save the driver.' });
     }
   });
+
 
   router.post('/api/partner/vehicle', async (req, res) => {
     try {
@@ -567,6 +762,9 @@ export function createPartnerRoutes({
 
   // O ficheiro sobe do browser para o Storage; aqui só registamos a
   // referência. O estado fica 'pending' até um administrador o aprovar.
+
+  // O ficheiro sobe do browser para o Storage; aqui só registamos a
+  // referência. O estado fica 'pending' até um administrador o aprovar.
   router.post('/api/partner/document', async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
@@ -594,6 +792,18 @@ export function createPartnerRoutes({
       stale = b.vehicle_id ? stale.eq('vehicle_id', b.vehicle_id) : stale.is('vehicle_id', null);
       await stale;
 
+      // Sem linha de empresa, a chave estrangeira recusa o
+      // documento — e o erro era "Could not register the document",
+      // que não dizia nada a ninguém.
+      const company = await ensurePartnerRow(user);
+
+      if (!company) {
+        return res.status(500).json({
+          error: 'We could not link this document to your company. ' +
+                 'Reload the page and try again — if it keeps happening, tell us in the chat.'
+        });
+      }
+
       const { error } = await supabase.from('compliance_documents').insert({
         partner_id: user.id,
         driver_id: b.driver_id || null,
@@ -608,12 +818,47 @@ export function createPartnerRoutes({
 
       if (error) throw error;
 
-      return res.json({ success: true, state: await loadPartnerState(user.id) });
+      // O documento antigo foi apagado acima, e com ele o motivo da
+      // recusa — que se referia ao ficheiro antigo. Se a conta estava
+      // à espera de correção, volta à fila de revisão assim que
+      // deixar de haver documentos recusados.
+      const state = await loadPartnerState(user.id);
+
+      if (state.partner?.status === 'action_required') {
+        const stillRejected = state.documents.some((d) => d.status === 'rejected');
+
+        if (!stillRejected) {
+          await supabase.from('driver_partners').update({
+            status: 'in_review',
+            submitted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }).eq('id', user.id);
+
+          return res.json({ success: true, state: await loadPartnerState(user.id) });
+        }
+      }
+
+      return res.json({ success: true, state });
     } catch (error) {
-      console.error('partner/document error:', error);
-      return res.status(500).json({ error: 'Could not register the document.' });
+      console.error('partner/document error:', error.code, error.message);
+      // A mensagem real do Postgres. "Could not register the
+      // document" não diz a ninguém o que fazer a seguir, e este é
+      // exatamente o género de erro que se diagnostica pela causa.
+      return res.status(500).json({
+        error: error.message || 'Could not register the document.'
+      });
     }
   });
+
+  // Submeter para revisão. Só aceita candidaturas completas — é o que
+  // evita revisões a meio e devoluções sucessivas.
+  // Submeter para verificação.
+  //
+  // Exige apenas os TRÊS documentos de entrada e os dados da empresa.
+  // Motoristas, veículos, zonas e IBAN ficam para a fase de ativação,
+  // já dentro do painel: pedir tudo à porta afasta metade dos
+  // candidatos, e um parceiro verificado é mais fácil de acompanhar do
+  // que um candidato que desistiu a meio.
 
   // Submeter para revisão. Só aceita candidaturas completas — é o que
   // evita revisões a meio e devoluções sucessivas.
@@ -636,29 +881,49 @@ export function createPartnerRoutes({
         return res.status(400).json({ error: 'Fill in your company details first.' });
       }
       if (!state.partner.legal_name) missing.push('your registered company name');
-      if (!state.partner.vat_number) missing.push('your VAT number');
       if (!state.partner.contact_phone) missing.push('a contact phone number');
       if (!req.body?.contract_accepted && !state.partner.contract_accepted_at) {
         missing.push('the partner agreement');
       }
 
+      // Os cinco passos, não só os documentos. Uma só revisão no fim
+      // é melhor para os dois lados: o parceiro não fica meio
+      // aprovado sem poder trabalhar, e tu decides uma vez em vez de
+      // duas.
       state.requirements
         .filter((r) => r.mandatory && r.scope === 'company' && r.stage === 'signup')
         .forEach((r) => {
-          const has = state.documents.some((d) =>
+          const doc = state.documents.find((d) =>
             d.requirement_code === r.code && !d.driver_id && !d.vehicle_id);
-          if (!has) missing.push(r.label);
+
+          if (!doc) missing.push(r.label);
+          else if (doc.status === 'rejected') {
+            missing.push(`${r.label} — ${doc.rejection_reason || 'needs replacing'}`);
+          }
         });
+
+      if (!state.drivers.some((d) => d.status === 'active')) {
+        missing.push('at least one active driver');
+      }
+      if (!state.vehicles.some((v) => v.status === 'active')) {
+        missing.push('at least one active vehicle');
+      }
+      if (!(state.partner.operating_airports || []).length) {
+        missing.push('the airports you serve');
+      }
+      if (!state.partner.payout_iban) {
+        missing.push('your payout details');
+      }
 
       if (missing.length) {
         return res.status(400).json({
-          error: 'A few things are still missing before we can verify you.',
+          error: 'A few things are still missing before we can review your account.',
           missing
         });
       }
 
       const { error } = await supabase.from('driver_partners').update({
-        status: 'submitted',
+        status: 'in_review',
         submitted_at: new Date().toISOString(),
         contract_accepted_at: state.partner.contract_accepted_at || new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -675,6 +940,10 @@ export function createPartnerRoutes({
       return res.status(500).json({ error: 'Could not submit your application.' });
     }
   });
+
+  // Agenda. Guardamos só as exceções: por omissão o parceiro está
+  // disponível, e marcar 365 dias por ano para dizer "sim" seria
+  // trabalho inútil para ele e para a base de dados.
 
   // Agenda. Guardamos só as exceções: por omissão o parceiro está
   // disponível, e marcar 365 dias por ano para dizer "sim" seria
@@ -712,6 +981,7 @@ export function createPartnerRoutes({
     }
   });
 
+
   router.get('/api/partner/availability', async (req, res) => {
     try {
       const user = await getUserFromRequest(req);
@@ -729,61 +999,268 @@ export function createPartnerRoutes({
   });
 
   // Revisão pelo admin.
-  router.post('/api/admin/partner/review', async (req, res) => {
+
+  router.get('/api/partner/chat', async (req, res) => {
     try {
-      const { user: admin, error: adminError } = await requireAdmin(req);
-      if (!admin) return res.status(403).json({ error: adminError || 'Administrator access required.' });
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in.' });
 
-      const { partner_id, decision, reason } = req.body || {};
+      // O chat está aberto a qualquer conta autenticada, incluindo
+      // quem está a meio do registo — que é precisamente quem mais
+      // precisa de ajuda. Se faltar a linha de empresa, cria-se.
+      await ensurePartnerRow(user);
 
-      if (!partner_id ||
-          !['verified', 'approved', 'rejected', 'in_review', 'suspended'].includes(decision)) {
-        return res.status(400).json({ error: 'Missing partner_id or invalid decision.' });
+      // Um assunto vindo do portal abre um ticket com título. Sem
+      // ele, continua a servir a conversa aberta que houver.
+      const chat = await chatFor(user.id, req.query.subject, req.query.topic);
+      if (!chat) return res.status(500).json({ error: 'Could not open your chat.' });
+
+      const [messagesRes, capacityRes, agenteRes] = await Promise.all([
+        supabase.from('partner_messages')
+          .select('*').eq('chat_id', chat.id)
+          // Aqui também, além da RLS. Duas barreiras: se uma falhar
+          // por engano numa migração, a outra segura.
+          .eq('internal', false)
+          .order('created_at').limit(200),
+        supabase.rpc('support_capacity'),
+
+        // Quem está a atender, se houver alguém. Vai na mesma volta
+        // que o resto: uma consulta a mais em série custaria outra
+        // ida ao servidor.
+        chat.assigned_to
+          ? supabase.from('support_presence')
+              .select('display_name, avatar_path')
+              .eq('user_id', chat.assigned_to)
+              .maybeSingle()
+          : Promise.resolve({ data: null })
+      ]);
+
+      const capacity = (capacityRes.data && capacityRes.data[0]) || {};
+      const agente = agenteRes?.data || null;
+
+      // Ao abrir, o que o admin escreveu passa a lido. Não o
+      // contrário: o admin marca as dele quando abre a conversa.
+      if (chat.unread_for_partner > 0) {
+        await supabase.from('partner_chats')
+          .update({ unread_for_partner: 0 })
+          .eq('id', chat.id);
       }
 
-      const update = {
-        status: decision,
-        rejection_reason: decision === 'rejected' ? (reason || null) : null,
-        reviewed_at: new Date().toISOString(),
-        reviewed_by: admin.id,
-        updated_at: new Date().toISOString()
-      };
+      // O histórico vai junto: o portal mostra as conversas
+      // anteriores ao lado da atual, sem um segundo pedido.
+      const history = await historyFor(user.id, 20);
 
-      // 'verified' = os três documentos de entrada foram aceites.
-      // 'approved' = está tudo completo e pode receber viagens.
-      if (decision === 'verified') update.verified_at = new Date().toISOString();
-      if (decision === 'approved') update.activated_at = new Date().toISOString();
+      return res.json({
+        chat,
+        messages: messagesRes.data || [],
+        history: history.filter((h) => h.chat_id !== chat.id),
+        // O parceiro precisa de saber três coisas diferentes: se há
+        // alguém, se já está a ser atendido, e há quanto tempo
+        // espera. Uma só bandeira "online" não distinguia nada disso.
+        support: {
+          agents_online: capacity.agents_online || 0,
+          free_slots: capacity.free_slots || 0,
+          waiting: capacity.waiting || 0,
+          assigned: Boolean(chat.assigned_to),
+          // Quem está do outro lado, com nome e fotografia.
+          //
+          // O portal mostrava "Airportlink" mesmo com um agente
+          // atribuído — falar com uma pessoa é diferente de falar
+          // com uma marca, e o nome já estava em cada mensagem.
+          agent_name: agente?.display_name || null,
+          agent_avatar: agente?.avatar_path || null,
+          waiting_minutes: chat.waiting_since
+            ? Math.round((Date.now() - new Date(chat.waiting_since).getTime()) / 60000)
+            : 0
+        }
+      });
+    } catch (error) {
+      console.error('partner/chat error:', error);
+      return res.status(500).json({ error: error.message || 'Could not load your chat.' });
+    }
+  });
 
-      const { data, error } = await supabase.from('driver_partners')
-        .update(update).eq('id', partner_id)
-        .select('id, email, legal_name, status').single();
+  /**
+   * Uma conversa antiga do próprio parceiro.
+   *
+   * Só de leitura: para responder tem de usar a conversa aberta,
+   * ou reabrir esta. Sem isto, o portal mostrava a lista mas não
+   * deixava abrir nenhuma.
+   */
+
+  /**
+   * Uma conversa antiga do próprio parceiro.
+   *
+   * Só de leitura: para responder tem de usar a conversa aberta,
+   * ou reabrir esta. Sem isto, o portal mostrava a lista mas não
+   * deixava abrir nenhuma.
+   */
+  router.get('/api/partner/chat/:id', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in.' });
+
+      const { data: chat } = await supabase
+        .from('partner_chats')
+        .select('*')
+        .eq('id', req.params.id)
+        // A verificação que interessa: é dele ou não é.
+        .eq('partner_id', user.id)
+        .maybeSingle();
+
+      if (!chat) return res.status(404).json({ error: 'Conversation not found.' });
+
+      const { data: messages } = await supabase
+        .from('partner_messages')
+        .select('*')
+        .eq('chat_id', chat.id)
+        .eq('internal', false)
+        .order('created_at')
+        .limit(300);
+
+      return res.json({ chat, messages: messages || [] });
+    } catch (error) {
+      console.error('partner/chat/:id error:', error);
+      return res.status(500).json({ error: 'Could not load that conversation.' });
+    }
+  });
+
+  /**
+   * Reabrir uma conversa fechada.
+   *
+   * Até 14 dias depois de fechada, e só se não houver outra aberta.
+   * As regras estão no Postgres para valerem venha o pedido de onde
+   * vier.
+   */
+
+  /**
+   * Reabrir uma conversa fechada.
+   *
+   * Até 14 dias depois de fechada, e só se não houver outra aberta.
+   * As regras estão no Postgres para valerem venha o pedido de onde
+   * vier.
+   */
+  router.post('/api/partner/chat/reopen', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in.' });
+
+      const { data: chat } = await supabase
+        .from('partner_chats')
+        .select('id')
+        .eq('id', req.body?.chat_id)
+        .eq('partner_id', user.id)
+        .maybeSingle();
+
+      if (!chat) return res.status(404).json({ error: 'Conversation not found.' });
+
+      const { data: ok } = await supabase.rpc('reopen_partner_chat', {
+        p_chat_id: chat.id
+      });
+
+      if (!ok) {
+        return res.status(409).json({
+          error: 'That conversation cannot be reopened. Start a new one instead.'
+        });
+      }
+
+      return res.json({ ok: true, chat_id: chat.id });
+    } catch (error) {
+      console.error('reopen error:', error);
+      return res.status(500).json({ error: 'Could not reopen that conversation.' });
+    }
+  });
+
+
+  router.post('/api/partner/chat/send', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in.' });
+
+      const body = String(req.body?.body || '').trim();
+      const attachmentPath = req.body?.attachment_path || null;
+
+      if (!body && !attachmentPath) {
+        return res.status(400).json({ error: 'Write something first.' });
+      }
+
+      if (body.length > 4000) {
+        return res.status(400).json({ error: 'That message is too long.' });
+      }
+
+      await ensurePartnerRow(user);
+
+      const chat = await chatFor(user.id);
+      if (!chat) return res.status(500).json({ error: 'Could not open your chat.' });
+
+      const { data: partner } = await supabase
+        .from('driver_partners')
+        .select('legal_name, trading_name, contact_name')
+        .eq('id', user.id).maybeSingle();
+
+      const { data, error } = await supabase
+        .from('partner_messages')
+        .insert({
+          chat_id: chat.id,
+          sender: 'partner',
+          sender_id: user.id,
+          sender_name: partner?.trading_name || partner?.legal_name || null,
+          body: body || null,
+          attachment_path: attachmentPath,
+          attachment_name: req.body?.attachment_name || null
+        })
+        .select()
+        .single();
 
       if (error) throw error;
 
-      // Aprovar a empresa ativa os motoristas e veículos que estavam à
-      // espera dela. Sem isto, um parceiro aprovado continuava sem
-      // poder receber viagens.
-      if (decision === 'verified' || decision === 'approved') {
-        await supabase.from('drivers').update({ status: 'active' })
-          .eq('partner_id', partner_id).eq('status', 'pending');
-        await supabase.from('partner_vehicles').update({ status: 'active' })
-          .eq('partner_id', partner_id).eq('status', 'pending');
-        await supabase.from('compliance_documents').update({
-          status: 'approved', reviewed_at: new Date().toISOString(), reviewed_by: admin.id
-        }).eq('partner_id', partner_id).eq('status', 'pending');
+      // Toca a alguém. O gatilho no Postgres já pôs a conversa em
+      // espera; isto escolhe quem atende e arranca os 30 segundos.
+      try { await supabase.rpc('offer_chat', { p_chat_id: chat.id }); } catch (e) {
+        console.error('offer_chat failed:', e.message);
       }
 
-      console.log('Partner reviewed:', { by: admin.email, partner: data.email, decision });
-
-      // O email não pode partir a decisão: já está gravada.
-      await notify.decision(data, decision, reason);
-
-      return res.json({ success: true, partner: data });
+      return res.json({ success: true, message: data });
     } catch (error) {
-      console.error('admin/partner/review error:', error);
-      return res.status(500).json({ error: 'Could not update the application.' });
+      console.error('partner/chat/send error:', error);
+      return res.status(500).json({
+        error: error.message || 'Your message did not send. Try again.'
+      });
     }
   });
+
+
+  router.post('/api/partner/chat/close', async (req, res) => {
+    try {
+      const user = await getUserFromRequest(req);
+      if (!user) return res.status(401).json({ error: 'Not signed in.' });
+
+      const chat = await chatFor(user.id);
+      if (!chat) return res.status(400).json({ error: 'No conversation to close.' });
+
+      const { data, error } = await asUser(req).rpc('close_chat_as_partner', {
+        p_chat_id: chat.id
+      });
+
+      if (error) throw error;
+      if (!data?.ok) return res.status(400).json({ error: 'Could not close that conversation.' });
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('partner/chat/close error:', error);
+      return res.status(500).json({ error: error.message || 'Could not close the conversation.' });
+    }
+  });
+
+  // ---------- lado do admin ----------
+
+  /**
+   * Marca as mensagens do parceiro como lidas.
+   *
+   * Chamado quando o agente abre a conversa. O parceiro passa a ver
+   * que o que escreveu chegou — é daí que vêm as mensagens
+   * repetidas quando não há resposta imediata.
+   */
 
   return router;
 }
