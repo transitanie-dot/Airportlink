@@ -140,15 +140,93 @@ function corpo(booking, partner) {
   const temMotorista = Boolean(booking.assigned_partner_id || partner);
 
   /**
-   * O título é o que se lê na vista de mês, e só cabem umas
-   * palavras. A hora e o dia já os dá o calendário, por isso o
-   * título leva o que ele não mostra: para onde, quantos, e quem.
+   * A classe de viatura.
+   *
+   * Nem sempre está na reserva — vem da metadata do Stripe e alguns
+   * caminhos não a preenchem. Sem ela, deriva-se dos passageiros,
+   * com a mesma regra do site.
+   */
+  const chave = booking.vehicle_class ||
+    (pax <= 3 ? 'sedan' : pax <= 4 ? 'premium' : pax <= 8 ? 'van'
+      : pax <= 13 ? 'van_sedan' : 'two_vans');
+
+  const CARRO = {
+    sedan: 'Sedan',
+    premium: 'Premium',
+    van: 'Van',
+    van_sedan: 'Van+Sedan',
+    two_vans: '2 Vans'
+  };
+
+  /**
+   * A cidade, tirada da morada.
+   *
+   * As moradas completas não cabem no título de um evento — na
+   * vista de mês vê-se meia dúzia de palavras. "Faro Airport,
+   * 8006-901 Faro, Portugal" ocupa a linha toda e não diz mais do
+   * que "Faro".
+   *
+   * A regra: o primeiro pedaço antes da vírgula, sem "Airport". É
+   * uma aproximação, mas acerta na esmagadora maioria e falha de
+   * forma inofensiva — mostra um pouco mais de texto.
+   */
+  const cidade = (t) => {
+    if (!t) return '';
+
+    let x = String(t).split(',')[0];
+
+    // Códigos de aeroporto entre parênteses: (AGP), (FCO).
+    x = x.replace(/\([A-Z]{3}\)/g, '');
+
+    /**
+     * As palavras de aeroporto, com as preposições que as
+     * acompanham.
+     *
+     * "Aeroporto de Lisboa" tem de dar "Lisboa", não "de Lisboa" —
+     * por isso o "de", "di", "of" e "d'" entram na mesma regra.
+     */
+    x = x.replace(
+      /\b(airport|aeroporto|aeropuerto|aéroport|aeroporto)\b\s*(de|do|da|di|of|d')?\s*/gi,
+      ''
+    );
+
+    /**
+     * O número da porta, quando a morada começa por ele.
+     *
+     * "Via del Corso 12" é uma rua, não uma cidade — mas o título
+     * fica melhor sem o número, e quem precisa da morada exata
+     * abre o evento.
+     */
+    x = x.replace(/\s+\d+[a-zA-Z]?$/, '');
+
+    x = x.replace(/\s+/g, ' ').trim();
+
+    /**
+     * Se sobrar de mais, corta-se.
+     *
+     * Uma morada sem vírgulas — acontece — enche o título e esconde
+     * o resto. Vinte e dois caracteres é o que cabe antes de a
+     * vista de mês truncar.
+     */
+    return x.length > 22 ? x.slice(0, 21).trim() + '…' : x;
+  };
+
+  const de = cidade(booking.pickup);
+  const para = cidade(booking.dropoff);
+
+  /**
+   * O título é o que se lê na vista de mês.
+   *
+   * A hora e o dia já os dá o calendário. O que ele não mostra é o
+   * carro, para onde vai, e se tem motorista — e é isso que aqui
+   * está, por essa ordem de importância.
    */
   const titulo = [
-    `${booking.pickup} → ${booking.dropoff}`,
+    CARRO[chave] || chave,
+    `${de} → ${para}`,
     `${pax}p`,
     temMotorista ? (partner?.trading_name || 'assigned') : 'NO DRIVER'
-  ].join(' · ');
+  ].filter(Boolean).join(' · ');
 
   const linhas = [
     booking.full_name || booking.passenger_name || '',
