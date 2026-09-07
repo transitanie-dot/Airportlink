@@ -6,6 +6,10 @@
  *
  *   turquesa      ainda sem motorista
  *   azul escuro   motorista atribuído
+ *   vermelho      cancelada
+ *
+ * E um cadeado no título quando já está paga. Sem cadeado é uma
+ * conta por fechar — que é o que se procura ao olhar para o mês.
  *
  * A cor muda sozinha quando a cascata encontra parceiro. Assim o
  * calendário conta a história sem ninguém lhe tocar — um mês
@@ -232,15 +236,41 @@ function corpo(booking, partner) {
    * abrir nada. O aberto é uma conta por fechar; o fechado é
    * dinheiro que já entrou.
    */
-  const pago = booking.amount_total != null || booking.payment_status === 'paid';
+  /**
+   * Pago é pago, não é "tem um valor".
+   *
+   * Isto olhava para o amount_total — que está preenchido em todas
+   * as reservas, incluindo as de pay later, porque é o preço da
+   * viagem e não o que já entrou.
+   *
+   * Resultado: o cadeado aparecia fechado desde o primeiro momento
+   * e nunca mudava. Um calendário que diz que está tudo pago não
+   * serve para saber o que falta cobrar.
+   *
+   * O payment_status é o que sabe: só passa a 'paid' quando o
+   * Stripe confirma.
+   */
+  const pago = booking.payment_status === 'paid'
+    || booking.payment_status === 'succeeded'
+    || Boolean(booking.charged_at);
 
   const cancelada = booking.status === 'cancelled';
 
   // O símbolo cola-se ao carro: um ponto entre eles seria ruído
   // numa linha que já tem três.
+  /**
+   * O cadeado só aparece quando está pago.
+   *
+   * Havia um aberto para o pay later, e isso era ruído: numa
+   * agenda com vinte eventos, vinte símbolos não distinguem nada.
+   *
+   * O cadeado fechado passa a querer dizer uma coisa só — este
+   * dinheiro já entrou. O que não o tem está por cobrar, e é isso
+   * que se procura ao olhar para o mês.
+   */
   const marca = cancelada
     ? 'CANCELLED'
-    : `${pago ? '🔒' : '🔓'} ${CARRO[chave] || chave}`;
+    : `${pago ? '🔒 ' : ''}${CARRO[chave] || chave}`;
 
   const titulo = [
     marca,
