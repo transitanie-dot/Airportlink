@@ -68,7 +68,7 @@ import {
   previewAll,
   sendPartnerStatement,
   sendAgentStatement,
-  notifyOps
+  notifyOps,
   // Ligar o alarme dos emails às operações.
   setEmailAlarm
 } from './emailService.js';
