@@ -12,7 +12,10 @@ import {
   telegramNoDriver,
   telegramDispute,
   telegramTest,
-  telegramDaySummary
+  telegramDaySummary,
+  // As tarefas automáticas avisam quando falham, e quando voltam.
+  telegramTaskFailed,
+  telegramTaskRecovered
 } from './telegram.js';
 /**
  * As viagens na agenda.
@@ -3224,6 +3227,52 @@ app.post('/api/stripe-webhook', async (req, res) => {
 // cron-job.org → POST https://airportlink.onrender.com/api/tasks/charge-due
 //                cabeçalho: x-cron-secret: <CRON_SECRET>
 // ============================================================
+
+/**
+ * Todas as rotas de tarefa, de uma vez.
+ *
+ * Envolver cada uma à mão seria cinco edições e cinco
+ * oportunidades de me enganar. Isto apanha qualquer rota
+ * /api/tasks/ — incluindo as que ainda não existem.
+ *
+ * Lê a resposta que a rota vai enviar: se for um erro, ou trouxer
+ * um campo "failures" com conteúdo, avisa. Se for um sucesso
+ * depois de uma falha, avisa também.
+ */
+app.use('/api/tasks', (req, res, next) => {
+  const nome = req.path.replace(/^\//, '') || 'task';
+
+  // Os testes não valem alarme: são corridos à mão de propósito.
+  if (/test|preview/.test(nome)) return next();
+
+  const jsonOriginal = res.json.bind(res);
+
+  res.json = (body) => {
+    try {
+      const falhas = body?.failures;
+
+      if (res.statusCode >= 400) {
+        telegramTaskFailed(nome,
+          body?.error || `HTTP ${res.statusCode}`).catch(() => {});
+      } else if (Array.isArray(falhas) && falhas.length) {
+        telegramTaskFailed(nome,
+          falhas.map((f) => `${f.part}: ${f.error}`).join('\n')).catch(() => {});
+      } else if (body?.ok === false) {
+        telegramTaskFailed(nome, body.reason || 'returned ok:false').catch(() => {});
+      } else {
+        telegramTaskRecovered(nome).catch(() => {});
+      }
+    } catch (e) {
+      // Um alarme que falha não deve travar a resposta.
+    }
+
+    return jsonOriginal(body);
+  };
+
+  next();
+});
+
+
 /**
  * Testar o email sem fazer uma reserva.
  *
@@ -3847,6 +3896,52 @@ app.post('/api/internal/calendar-sync', async (req, res) => {
 
 
 /**
+ * Correr uma tarefa automática e avisar se falhar.
+ *
+ * As tarefas corriam com um try/catch que registava o erro na
+ * consola do Render — onde ninguém olha. O Google Calendar falhou
+ * uma semana inteira em silêncio, e só se descobriu quando uma
+ * reserva não apareceu na agenda.
+ *
+ * Agora cada falha vai para o canal de alarmes, com som. E quando
+ * a tarefa voltar a funcionar, avisa também: sem isso, alguém vai
+ * investigar um problema que já se resolveu.
+ */
+async function tarefa(nome, fn) {
+  try {
+    const r = await fn();
+
+    /**
+     * Uma tarefa pode devolver falhas sem lançar exceção.
+     *
+     * O support_tick corre sete rotinas em blocos separados, para
+     * que uma falha não trave as outras — e devolve o que correu
+     * mal num campo "failures". Ninguém o lia.
+     */
+    const falhas = r?.failures;
+
+    if (Array.isArray(falhas) && falhas.length) {
+      await telegramTaskFailed(nome,
+        falhas.map((f) => `${f.part}: ${f.error}`).join('\n')).catch(() => {});
+
+      return r;
+    }
+
+    await telegramTaskRecovered(nome).catch(() => {});
+    return r;
+  } catch (error) {
+    console.error(`[task] ${nome}:`, error.message);
+
+    await telegramTaskFailed(nome, error.message,
+      error.stack?.slice(0, 200)).catch(() => {});
+
+    throw error;
+  }
+}
+
+
+/**
+ * Cobrar a espera, no cartão que já está guardado./**
  * Cobrar a espera, no cartão que já está guardado.
  *
  * Chamada quando o cliente aceita, no momento do código. Ele está
@@ -4357,7 +4452,79 @@ app.post('/api/internal/reassign', async (req, res) => {
 });
 
 
-/** Confirmar que a consulta de voos funciona. */
+/**
+ * As reservas futuras que não estão na agenda.
+ *
+ * O evento é criado quando a reserva nasce. Se o Google estiver em
+ * baixo nesse momento — ou o token expirado, como aconteceu — a
+ * reserva fica sem evento e ninguém dá por isso.
+ *
+ * Isto passa por todas as reservas dos próximos trinta dias e
+ * garante o evento. O upsert não duplica: procura pelo booking_id
+ * antes de criar.
+ *
+ * Uma vez por dia chega. O evento certo no dia seguinte é melhor
+ * do que nenhum.
+ */
+app.post('/api/tasks/calendar-sweep', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const hoje = new Date().toISOString().slice(0, 10);
+
+    const limite = new Date();
+    limite.setDate(limite.getDate() + 30);
+
+    const { data: reservas, error } = await supabase
+      .from('bookings')
+      .select('*')
+      .gte('booking_date', hoje)
+      .lte('booking_date', limite.toISOString().slice(0, 10))
+      .neq('status', 'cancelled')
+      .order('booking_date')
+      .limit(200);
+
+    if (error) throw error;
+
+    let feitas = 0;
+    let falhadas = 0;
+    const erros = [];
+
+    for (const b of reservas || []) {
+      try {
+        const r = await calendarUpsert(b);
+        if (r?.ok) feitas += 1;
+      } catch (e) {
+        falhadas += 1;
+
+        // O primeiro erro chega: se o Google está em baixo, os
+        // duzentos vão dizer o mesmo.
+        if (erros.length < 3) erros.push(`${b.booking_reference}: ${e.message}`);
+      }
+    }
+
+    console.log('[calendar] swept', feitas, 'of', reservas?.length || 0);
+
+    return res.json({
+      ok: falhadas === 0,
+      checked: reservas?.length || 0,
+      synced: feitas,
+      failed: falhadas,
+      // O middleware das tarefas lê isto e avisa no Telegram.
+      failures: erros.length
+        ? erros.map((e) => ({ part: 'calendar', error: e }))
+        : undefined
+    });
+  } catch (error) {
+    console.error('[calendar] sweep failed:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
 app.get('/api/tasks/flights-test', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
