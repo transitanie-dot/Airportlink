@@ -381,60 +381,192 @@ export async function telegramNoDriver(bookings) {
 export async function telegramDaySummary(s) {
   if (!s) return { sent: false, reason: 'nothing' };
 
-  const linhas = [`*${esc(s.date)}*`, ''];
+  const v = s.sales || {};
+  const op = s.operated || {};
+  const of = s.offers || {};
+  const moeda = v.currency || 'EUR';
 
-  // ---------- o que entrou ----------
-  if (s.new_bookings > 0) {
+  const n = (x) => Number(x || 0).toFixed(0);
+  const n2 = (x) => Number(x || 0).toFixed(2);
+
+  const linhas = [`*${esc(s.day || '')}*`, ''];
+
+  // ---------- o que se vendeu ----------
+  if (v.count > 0) {
+    /**
+     * O VENDIDO primeiro, não o cobrado.
+     *
+     * O resumo somava o amount_total, que é nulo nos pay later —
+     * uma noite com cinco reservas pay later mostrava "0 EUR", e
+     * isso é pior do que não mostrar nada: parece que não se
+     * vendeu.
+     */
     linhas.push(
-      `📥 *${esc(s.new_bookings)} new booking${s.new_bookings === 1 ? '' : 's'}* ` +
-      `· ${esc(Number(s.revenue || 0).toFixed(2))} EUR`
+      `📥 *${esc(v.count)} booking${v.count === 1 ? '' : 's'}* · ` +
+      `${esc(n(v.sold))} ${esc(moeda)}`
     );
+
+    const detalhe = [];
+
+    if (v.paid_now) detalhe.push(`${v.paid_now} paid`);
+
+    // O que fica para cobrar, e quanto. É dinheiro que existe mas
+    // ainda não entrou.
+    if (v.pay_later) {
+      detalhe.push(`${v.pay_later} pay later (${n(v.to_charge)})`);
+    }
+
+    if (v.from_agency) detalhe.push(`${v.from_agency} from agencies`);
+
+    if (detalhe.length) linhas.push(`   ${esc(detalhe.join(' · '))}`);
+
+    /**
+     * O que sobrou depois da Stripe.
+     *
+     * A diferença entre o cobrado e o liquidado é a taxa — e é a
+     * única despesa que se paga em cada venda, por isso vale a
+     * linha.
+     */
+    if (v.stripe_fees > 0) {
+      linhas.push(
+        `   _${esc(n2(v.charged))} charged · ` +
+        `${esc(n2(v.stripe_fees))} Stripe · ` +
+        `${esc(n2(v.settled))} settled_`
+      );
+    }
   } else {
     linhas.push('📥 No bookings today');
   }
 
-  // ---------- o que se fez ----------
-  if (s.trips_today > 0) {
+  // ---------- os pay later cobrados hoje ----------
+  const c = s.charged_today || {};
+
+  if (c.count > 0) {
     linhas.push('');
-    linhas.push(`🚗 *${esc(s.trips_today)} transfer${s.trips_today === 1 ? '' : 's'} today*`);
+    linhas.push(
+      `💳 *${esc(c.count)} pay later charged* · ${esc(n(c.amount))} ${esc(moeda)}`
+    );
+  }
+
+  // ---------- os reembolsos ----------
+  const r = s.refunds || {};
+
+  if (r.count > 0) {
+    linhas.push('');
+    linhas.push(
+      `↩️ *${esc(r.count)} refund${r.count === 1 ? '' : 's'}* · ` +
+      `${esc(n(r.amount))} ${esc(moeda)}`
+    );
+  }
+
+  // ---------- as rotas ----------
+  const rotas = s.top_routes || [];
+
+  if (rotas.length) {
+    linhas.push('');
+    linhas.push('🗺 *Where they are going*');
+
+    rotas.forEach((x) => {
+      linhas.push(
+        `   ${esc(x.de || '?')} → ${esc(x.para || '?')} · ` +
+        `${esc(x.n)}× · ${esc(n(x.valor))}`
+      );
+    });
+  }
+
+  // ---------- o que se fez ----------
+  if (op.total > 0) {
+    linhas.push('');
+    linhas.push(
+      `🚗 *${esc(op.total)} transfer${op.total === 1 ? '' : 's'} today*`
+    );
 
     const partes = [];
-    if (s.completed) partes.push(`${s.completed} completed`);
-    if (s.cancelled) partes.push(`${s.cancelled} cancelled`);
-    if (s.no_driver) partes.push(`${s.no_driver} with no driver`);
+    if (op.completed) partes.push(`${op.completed} done`);
+    if (op.cancelled) partes.push(`${op.cancelled} cancelled`);
+    if (op.no_shows) partes.push(`${op.no_shows} no-show`);
+    if (op.no_driver) partes.push(`${op.no_driver} with no driver`);
 
     if (partes.length) linhas.push(`   ${esc(partes.join(' · '))}`);
 
+    // O que se deve aos parceiros pelas de hoje.
+    if (op.partner_payout > 0) {
+      linhas.push(`   _${esc(n(op.partner_payout))} owed to partners_`);
+    }
+
     /**
-     * O custo dos táxis, quando houve.
+     * O custo dos táxis.
      *
-     * É a margem que se perdeu por não ter cobertura, e o número
-     * que diz onde recrutar — melhor do que qualquer previsão,
-     * porque é dinheiro que já saiu.
+     * É a margem que se perdeu por não ter cobertura. Se aparecer
+     * todos os dias na mesma zona, é onde falta recrutar.
      */
-    if (s.used_taxi > 0) {
+    if (op.taxi_fallback > 0) {
       linhas.push(
-        `   💸 ${esc(s.used_taxi)} needed a taxi · ` +
-        `${esc(Number(s.taxi_cost || 0).toFixed(2))} EUR out of pocket`
+        `   ⚠️ ${esc(op.taxi_fallback)} by taxi · ` +
+        `${esc(n(op.taxi_cost))} ${esc(moeda)} out of margin`
       );
     }
   }
 
-  // ---------- amanhã ----------
-  if (s.tomorrow_total > 0) {
+  // ---------- a cascata ----------
+  if (of.made > 0) {
     linhas.push('');
     linhas.push(
-      `📅 Tomorrow: ${esc(s.tomorrow_total)} transfer` +
-      `${s.tomorrow_total === 1 ? '' : 's'}` +
-      (s.tomorrow_without_driver > 0
-        ? `, *${esc(s.tomorrow_without_driver)} still without a driver*`
-        : ', all covered')
+      `📨 *${esc(of.made)} offer${of.made === 1 ? '' : 's'}* · ` +
+      `${esc(of.accepted)} accepted`
+    );
+
+    const problemas = [];
+    if (of.declined) problemas.push(`${of.declined} declined`);
+    if (of.expired) problemas.push(`${of.expired} ignored`);
+
+    if (problemas.length) linhas.push(`   ${esc(problemas.join(' · '))}`);
+
+    if (of.active_partners) {
+      linhas.push(`   _${esc(of.active_partners)} partners drove today_`);
+    }
+  }
+
+  // ---------- o apoio ----------
+  const ap = s.support || {};
+
+  if (ap.conversations > 0) {
+    linhas.push('');
+    linhas.push(
+      `💬 ${esc(ap.conversations)} conversation${ap.conversations === 1 ? '' : 's'}` +
+      (ap.closed ? ` · ${esc(ap.closed)} closed` : '')
     );
   }
 
-  return send(SALES, linhas.join('\n'), {
-    silent: !(s.tomorrow_without_driver > 0)
-  });
+  /**
+   * Amanhã, no fim.
+   *
+   * É a única linha sobre o futuro, e a que decide se alguém vai
+   * trabalhar esta noite. Por isso fica no fim: é o que se lê por
+   * último e o que fica na cabeça.
+   */
+  const am = s.tomorrow || {};
+
+  if (am.total > 0) {
+    linhas.push('');
+    linhas.push(
+      `📅 *Tomorrow:* ${esc(am.total)} transfer${am.total === 1 ? '' : 's'}` +
+      (am.no_driver
+        ? ` · *${esc(am.no_driver)} with no driver*`
+        : ' · all covered')
+    );
+  }
+
+  /**
+   * Silencioso quando o dia correu bem.
+   *
+   * Um resumo às 23h59 não precisa de acordar ninguém. Mas se
+   * houver viagens sem motorista amanhã, ou táxis a sair da
+   * margem, isso é para agora.
+   */
+  const urgente = am.no_driver > 0 || op.no_driver > 0 || op.taxi_fallback > 0;
+
+  return send(ALERTS, linhas.join('\n'), { silent: !urgente });
 }
 
 
