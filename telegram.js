@@ -111,6 +111,86 @@ async function send(chatId, text, options = {}) {
  * entrar ao longo do dia diz mais sobre o negócio do que qualquer
  * relatório.
  */
+/**
+ * Uma tarefa automática falhou.
+ *
+ * Vai para o canal de alarmes, com som. É a diferença entre saber
+ * que uma coisa parou e descobri-lo uma semana depois — o que
+ * aconteceu com o Google Calendar, cujo token expirou e ninguém
+ * reparou até um cliente perguntar pela reserva.
+ *
+ * A chave evita repetir: um cron que falha de minuto a minuto
+ * mandaria mil e quatrocentas mensagens por dia, e a milésima não
+ * diz nada que a primeira não tenha dito.
+ */
+const avisadosRecentemente = new Map();
+
+export async function telegramTaskFailed(tarefa, erro, detalhe) {
+  const chave = `${tarefa}:${String(erro).slice(0, 60)}`;
+  const agora = Date.now();
+
+  /**
+   * Uma hora de silêncio por erro repetido.
+   *
+   * Tempo suficiente para não encher o canal, curto para o
+   * problema não passar despercebido um turno inteiro.
+   */
+  const ultimo = avisadosRecentemente.get(chave);
+
+  if (ultimo && agora - ultimo < 3600000) return { skipped: true };
+
+  avisadosRecentemente.set(chave, agora);
+
+  // A memória não cresce sem fim: fora o que já passou de duas
+  // horas.
+  for (const [k, t] of avisadosRecentemente) {
+    if (agora - t > 7200000) avisadosRecentemente.delete(k);
+  }
+
+  const linhas = [
+    `⚠️ <b>${esc(tarefa)}</b> failed`,
+    '',
+    esc(String(erro).slice(0, 300))
+  ];
+
+  if (detalhe) {
+    linhas.push('', esc(String(detalhe).slice(0, 300)));
+  }
+
+  linhas.push('', `<i>${new Date().toLocaleString('en-GB', {
+    timeZone: 'America/Recife',
+    day: '2-digit', month: 'short',
+    hour: '2-digit', minute: '2-digit'
+  })}</i>`);
+
+  return send(ALERTS, linhas.join('\n'), { silent: false });
+}
+
+
+/**
+ * Uma tarefa voltou a funcionar.
+ *
+ * Só se tinha falhado antes. Saber que uma coisa se resolveu vale
+ * tanto como saber que parou — sem isso, alguém vai investigar um
+ * problema que já não existe.
+ */
+export async function telegramTaskRecovered(tarefa) {
+  const tinhaFalhado = [...avisadosRecentemente.keys()]
+    .some((k) => k.startsWith(tarefa + ':'));
+
+  if (!tinhaFalhado) return { skipped: true };
+
+  // Limpar, para o próximo problema avisar de imediato.
+  for (const k of [...avisadosRecentemente.keys()]) {
+    if (k.startsWith(tarefa + ':')) avisadosRecentemente.delete(k);
+  }
+
+  return send(ALERTS,
+    `✅ <b>${esc(tarefa)}</b> is working again`,
+    { silent: true });
+}
+
+
 export async function telegramNewBooking(booking, assignment) {
   /**
    * O valor em EUROS, não em cêntimos.
