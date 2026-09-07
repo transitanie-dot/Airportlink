@@ -75,6 +75,19 @@ export async function notifyOps(subject, lines, override) {
 let supabase = null;
 
 /**
+ * Como avisar quando um email falha.
+ *
+ * Injetada de fora em vez de importada: o emailService não deve
+ * saber que existe Telegram. Se um dia o alarme for por outro
+ * canal, muda-se num sítio.
+ */
+let avisarFalha = null;
+
+export function setEmailAlarm(fn) {
+  avisarFalha = fn;
+}
+
+/**
  * Quando ligada, o sendOnce não regista nem verifica duplicados.
  * Só a pré-visualização a usa.
  */
@@ -330,6 +343,23 @@ async function sendOnce({ key, template, to, subject, html, bookingId, replyTo }
     }).eq('id', row.id);
 
     console.error(`[email] ${template} failed:`, error.message);
+
+    /**
+     * E as operações sabem.
+     *
+     * Um email que não chega é invisível: o cliente não recebe a
+     * confirmação, o parceiro não recebe a oferta, e a única marca
+     * é uma linha na consola do Render.
+     *
+     * O sendRideOffer é o pior caso — sem ele a cascata pára e a
+     * viagem fica sem motorista sem ninguém dar por isso.
+     */
+    if (avisarFalha) {
+      avisarFalha(`email: ${template}`,
+        `${error.message}\n\nTo: ${to}` +
+        (bookingId ? `\nBooking: ${bookingId}` : '')
+      ).catch(() => {});
+    }
     return { sent: false, reason: 'send-failed', error: error.message };
   }
 }
