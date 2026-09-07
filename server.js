@@ -53,6 +53,7 @@ import {
   sendRideOfferReminder,
   sendTripReminder,
   sendDriverArrived,
+  sendRideChanged,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -3295,6 +3296,8 @@ const INTERNAL_TEMPLATES = {
   // O empurrão a meio do prazo. É o que mais reduz o ignorar.
   ride_offer_reminder: (p) =>
     sendRideOfferReminder(p.partner, p.booking, p.offer),
+  // A viagem mudou depois de ele a aceitar.
+  ride_changed: (p) => sendRideChanged(p.partner, p.booking, p.mudanca),
   // O link de confirmação só pode ser gerado aqui: é este serviço
   // que tem o cliente com service_role.
   verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
@@ -3936,6 +3939,228 @@ app.post('/api/internal/charge-extra', async (req, res) => {
 
 
 /**
+ * Alterar uma reserva.
+ *
+ * Até 24 horas antes, altera-se tudo. Depois disso, fala-se com o
+ * apoio.
+ *
+ * O preço é recalculado AQUI, com a rota medida de novo. Aceitar
+ * um preço vindo do browser seria aceitar um preço que qualquer
+ * pessoa pode editar.
+ */
+app.post('/api/booking/change', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+  const { booking_id, changes } = req.body || {};
+
+  if (!booking_id || !changes || !Object.keys(changes).length) {
+    return res.status(400).json({ error: 'Send booking_id and what to change.' });
+  }
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    // A reserva é dele, ou é um agente.
+    const { user: admin } = await requireAdmin(req).catch(() => ({ user: null }));
+
+    if (booking.user_id !== user.id && !admin) {
+      return res.status(403).json({ error: 'That booking is not yours.' });
+    }
+
+    // A janela, antes de fazer trabalho nenhum.
+    const { data: pode } = await supabase.rpc('can_change_booking', {
+      p_booking_id: booking_id
+    });
+
+    if (!pode?.ok) {
+      return res.status(400).json({
+        error: pode?.message || 'This booking can no longer be changed.',
+        reason: pode?.reason,
+        hours_left: pode?.hours_left
+      });
+    }
+
+    /**
+     * O preço, se a rota ou os passageiros mudaram.
+     *
+     * Medir a rota custa uma chamada ao Google. Só se faz quando a
+     * morada mudou — mudar a hora não muda a distância.
+     */
+    let novoPreco = null;
+    let novoKm = null;
+
+    const mudouRota = changes.pickup || changes.dropoff;
+    const mudouPax = changes.passengers != null;
+
+    if (mudouRota || mudouPax) {
+      const de = changes.pickup || booking.pickup;
+      const para = changes.dropoff || booking.dropoff;
+      const pax = Number(changes.passengers) || booking.passengers || 1;
+
+      const rota = mudouRota
+        ? await getDistanceAndDuration(de, para)
+        : { distanceKm: booking.distance_km, isPortugalRoute: null };
+
+      novoKm = rota.distanceKm;
+
+      novoPreco = computePriceEUR({
+        distanceKm: rota.distanceKm,
+        passengers: pax,
+        pickup: de,
+        dropoff: para,
+        isPortugalRoute: rota.isPortugalRoute
+      });
+    }
+
+    const { data: result, error } = await supabase.rpc('apply_booking_change', {
+      p_booking_id: booking_id,
+      p_changes: changes,
+      p_new_price: novoPreco,
+      p_new_km: novoKm
+    });
+
+    if (error) throw error;
+
+    if (result?.ok === false) {
+      return res.status(400).json({ error: result.message || 'Could not change it.' });
+    }
+
+    const diferenca = Number(result?.price_difference || 0);
+
+    /**
+     * O dinheiro.
+     *
+     * Sobe: cobra-se no cartão guardado. Desce: reembolsa-se. As
+     * duas sem esperar — a alteração já foi feita, e o cliente não
+     * deve ficar à espera do Stripe para ver a reserva atualizada.
+     */
+    if (diferenca > 0.5) {
+      acertarDiferenca(booking, diferenca, 'charge').catch((e) =>
+        console.error('[change] charge failed:', e.message));
+    } else if (diferenca < -0.5) {
+      acertarDiferenca(booking, Math.abs(diferenca), 'refund').catch((e) =>
+        console.error('[change] refund failed:', e.message));
+    }
+
+    /**
+     * O motorista, quando a data ou a rota mudam.
+     *
+     * Ele aceitou uma viagem num dia e num percurso. Se qualquer
+     * dos dois mudar, recebe outra coisa — e deve poder devolvê-la
+     * sem penalização.
+     */
+    if (result?.notify_partner) {
+      avisarParceiroDaMudanca(booking, result).catch((e) =>
+        console.error('[change] partner notice failed:', e.message));
+    }
+
+    // E a agenda acompanha.
+    const { data: atualizada } = await supabase
+      .from('bookings').select('*').eq('id', booking_id).maybeSingle();
+
+    if (atualizada) calendarUpsert(atualizada).catch(() => {});
+
+    return res.json({
+      success: true,
+      price_difference: diferenca,
+      new_price: novoPreco ?? booking.price,
+      partner_notified: Boolean(result?.notify_partner)
+    });
+  } catch (error) {
+    console.error('booking/change:', error);
+    return res.status(500).json({ error: 'Could not change the booking.' });
+  }
+});
+
+
+/** Cobrar ou devolver a diferença de uma alteração. */
+async function acertarDiferenca(booking, valor, tipo) {
+  const currency = booking.currency || 'EUR';
+  const amount = toStripeAmount(valor, currency);
+
+  if (tipo === 'charge') {
+    if (!booking.stripe_payment_method_id || !booking.stripe_customer_id) {
+      await notifyOps('Booking change needs a payment', [
+        `Booking: ${booking.booking_reference || booking.id}`,
+        `Customer: ${booking.full_name} (${booking.email})`,
+        `Owed: ${valor.toFixed(2)} ${currency}`,
+        '',
+        'No saved card. Somebody should follow up.'
+      ]);
+      return;
+    }
+
+    await stripe.paymentIntents.create({
+      amount,
+      currency: currency.toLowerCase(),
+      customer: booking.stripe_customer_id,
+      payment_method: booking.stripe_payment_method_id,
+      off_session: true,
+      confirm: true,
+      description: `Booking change — ${booking.booking_reference || booking.id}`,
+      metadata: { booking_id: String(booking.id), kind: 'change_difference' }
+    });
+
+    console.log('[change] charged', valor.toFixed(2), currency);
+    return;
+  }
+
+  /**
+   * O reembolso.
+   *
+   * Só se houver pagamento para reembolsar. Num pay-later ainda não
+   * cobrado, a diferença sai da cobrança futura sozinha — o preço
+   * já foi atualizado.
+   */
+  if (!booking.stripe_payment_intent_id) return;
+
+  await stripe.refunds.create({
+    payment_intent: booking.stripe_payment_intent_id,
+    amount,
+    metadata: { booking_id: String(booking.id), kind: 'change_difference' }
+  });
+
+  console.log('[change] refunded', valor.toFixed(2), currency);
+}
+
+
+/**
+ * O motorista soube que a viagem mudou.
+ *
+ * Com um botão para a devolver. Devolver não penaliza: ele aceitou
+ * uma coisa e recebeu outra, e contar isso contra ele ensinaria os
+ * parceiros a não aceitar nada que pudesse mudar.
+ */
+async function avisarParceiroDaMudanca(booking, result) {
+  const { data: partner } = await supabase
+    .from('driver_partners')
+    .select('id, email, trading_name, legal_name')
+    .eq('id', result.partner_id)
+    .maybeSingle();
+
+  if (!partner?.email) return;
+
+  const { data: nova } = await supabase
+    .from('bookings').select('*').eq('id', booking.id).maybeSingle();
+
+  await sendRideChanged(partner, nova || booking, {
+    date_changed: result.date_changed,
+    route_changed: result.route_changed,
+    old_date: booking.booking_date,
+    old_pickup: booking.pickup,
+    old_dropoff: booking.dropoff
+  });
+}
+
+
+/**
  * O motorista chegou: avisar o cliente.
  *
  * Chamada pelo portal de motoristas. O email vive aqui porque é
@@ -4075,6 +4300,37 @@ app.post('/api/internal/flight-landing', async (req, res) => {
   } catch (error) {
     console.error('flight-landing:', error);
     return res.json({ ok: false, reason: error.message });
+  }
+});
+
+
+/**
+ * Reatribuir uma viagem que voltou à fila.
+ *
+ * Chamada quando um parceiro devolve uma viagem alterada. A
+ * cascata recomeça do zero — e ele próprio pode voltar a ser
+ * oferecido, porque a razão para recusar pode ter desaparecido.
+ */
+app.post('/api/internal/reassign', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings').select('*').eq('id', booking_id).maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    await atribuir(booking);
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('reassign:', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
