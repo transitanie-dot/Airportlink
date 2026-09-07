@@ -17,6 +17,7 @@ import {
   telegramTaskFailed,
   telegramTaskRecovered
 } from './telegram.js';
+
 /**
  * As viagens na agenda.
  *
@@ -68,7 +69,18 @@ import {
   sendPartnerStatement,
   sendAgentStatement,
   notifyOps
+  // Ligar o alarme dos emails às operações.
+  setEmailAlarm
 } from './emailService.js';
+
+/**
+ * Um email que falha avisa no canal de alarmes.
+ *
+ * Ligado aqui e não dentro do emailService: esse ficheiro não deve
+ * saber que existe Telegram. Se um dia o alarme for por outro
+ * canal, muda-se nesta linha.
+ */
+setEmailAlarm(telegramTaskFailed);
 import { createShared } from './support-shared.js';
 import { createPartnerRoutes } from './partners.js';
 
@@ -895,6 +907,730 @@ app.get('/health', async (req, res) => {
     ratesAgeSeconds: Math.round((Date.now() - fetchedAt) / 1000)
   });
 });
+
+/**
+ * Qualquer erro da API vai para o canal de alarmes.
+ *
+ * O middleware das tarefas cobria os crons. Mas um erro no
+ * checkout é uma venda perdida, e esse só aparecia na consola do
+ * Render — onde ninguém olha até alguém se queixar.
+ *
+ * Isto apanha tudo o que responda com 5xx, e os 4xx que importam.
+ * Não apanha os 404 nem os 403: um endereço errado ou uma sessão
+ * expirada não são problemas nossos.
+ */
+app.use((req, res, next) => {
+  // As tarefas têm o seu próprio middleware, mais detalhado.
+  if (req.path.startsWith('/api/tasks')) return next();
+
+  // Só o que é API. Os ficheiros estáticos não interessam.
+  if (!req.path.startsWith('/api/')) return next();
+
+  const jsonOriginal = res.json.bind(res);
+
+  res.json = (body) => {
+    try {
+      const codigo = res.statusCode;
+
+      /**
+       * O que vale um alarme.
+       *
+       * 5xx é sempre nosso — o servidor rebentou.
+       *
+       * 400 num checkout é um cliente que não conseguiu comprar, e
+       * isso interessa saber. 400 noutro sítio pode ser só um
+       * pedido mal formado.
+       *
+       * 401, 403 e 404 não avisam: são sessões expiradas e
+       * endereços errados, e encheriam o canal.
+       */
+      const critico = /checkout|payment|charge|booking|refund|webhook/.test(req.path);
+
+      if (codigo >= 500 || (codigo === 400 && critico)) {
+        telegramTaskFailed(
+          `${req.method} ${req.path}`,
+          body?.error || `HTTP ${codigo}`
+        ).catch(() => {});
+      }
+    } catch (e) {
+      // Um alarme que falha não deve travar a resposta.
+    }
+
+    return jsonOriginal(body);
+  };
+
+  next();
+});
+
+
+app.use('/api/tasks', (req, res, next) => {
+  const nome = req.path.replace(/^\//, '') || 'task';
+
+  // Os testes não valem alarme: são corridos à mão de propósito.
+  if (/test|preview/.test(nome)) return next();
+
+  const jsonOriginal = res.json.bind(res);
+
+  res.json = (body) => {
+    try {
+      const falhas = body?.failures;
+
+      if (res.statusCode >= 400) {
+        telegramTaskFailed(nome,
+          body?.error || `HTTP ${res.statusCode}`).catch(() => {});
+      } else if (Array.isArray(falhas) && falhas.length) {
+        telegramTaskFailed(nome,
+          falhas.map((f) => `${f.part}: ${f.error}`).join('\n')).catch(() => {});
+      } else if (body?.ok === false) {
+        telegramTaskFailed(nome, body.reason || 'returned ok:false').catch(() => {});
+      } else {
+        telegramTaskRecovered(nome).catch(() => {});
+      }
+    } catch (e) {
+      // Um alarme que falha não deve travar a resposta.
+    }
+
+    return jsonOriginal(body);
+  };
+
+  next();
+});
+
+
+/**
+ * Testar o email sem fazer uma reserva.
+ *
+ * Existe porque diagnosticar "não recebi nada" através de uma
+ * reserva real mistura três coisas que podem falhar: o Stripe, o
+ * webhook e o email. Isto testa só a última.
+ *
+ * Protegido pelo mesmo segredo do cron: não é uma rota pública.
+ */
+app.post('/api/tasks/test-email', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
+  if (!to) {
+    return res.status(400).json({ error: 'Send { "to": "you@example.com" } or set EMAIL_OPERATIONS.' });
+  }
+
+  const checks = {
+    resend_key: Boolean(process.env.RESEND_API_KEY),
+    from: process.env.EMAIL_FROM_BOOKINGS || process.env.EMAIL_FROM || '(default)',
+    reply_to: process.env.EMAIL_REPLY_TO || '(default)',
+    email_log_table: null,
+    delivered: false,
+    error: null
+  };
+
+  // A email_log existe? É a causa mais provável de nada sair: sem a
+  // tabela, o registo falha e o envio é abandonado antes de começar.
+  try {
+    const { error } = await supabase.from('email_log').select('id').limit(1);
+    checks.email_log_table = error ? `MISSING — ${error.message}` : 'ok';
+  } catch (error) {
+    checks.email_log_table = `MISSING — ${error.message}`;
+  }
+
+  // Envio direto, sem passar pelo registo: queremos saber se o
+  // Resend aceita, separado de tudo o resto.
+  try {
+    const result = await notifyOps('Test email', [
+      'If you are reading this, Resend is working.',
+      `Sent at ${new Date().toISOString()}`,
+      `From: ${checks.from}`
+    ], to);
+    checks.delivered = result.sent;
+    if (!result.sent) checks.error = result.reason || 'unknown';
+  } catch (error) {
+    checks.error = error.message;
+  }
+
+  console.log('[email] test run:', checks);
+
+  return res.json({ to, ...checks });
+});
+
+/**
+ * O correio de todos os dias.
+ *
+ * Uma só chamada trata do que depende do calendário: os detalhes do
+ * motorista na véspera, os documentos a expirar, e o aviso interno
+ * das viagens que ninguém quis.
+ *
+ * Corre uma vez por dia, de manhã. Não de hora a hora: um lembrete
+ * que chega às três da manhã é pior do que nenhum.
+ *
+ * cron-job.org → POST /api/tasks/daily-emails, às 09:15
+ */
+/**
+ * Envio de emails para o serviço dos motoristas.
+ *
+ * O emailService vive aqui e só aqui. O outro serviço pede a esta
+ * rota em vez de ter uma cópia do ficheiro — duas cópias divergem
+ * sempre, e no dia em que divergem um dos dois manda o texto antigo.
+ *
+ * A proteção é o CRON_SECRET, mas não é só isso: os modelos são uma
+ * LISTA FECHADA. Quem tivesse o segredo não poderia mandar um email
+ * qualquer a partir do nosso domínio — apenas disparar um destes
+ * três, que são inofensivos fora de contexto.
+ */
+const INTERNAL_TEMPLATES = {
+  partner_received: (p) => sendPartnerApplicationReceived(p.partner),
+  partner_decision: (p) => sendPartnerDecision(p.partner, p.decision, p.reason),
+  ride_confirmed: (p) => sendRideConfirmedToPartner(p.partner, p.booking),
+  // A oferta com prazo, mandada pelo serviço de drivers quando a
+  // cascata avança. Sem ela, só o primeiro parceiro de cada viagem
+  // era avisado.
+  ride_offer: (p) => sendRideOffer(p.partner, p.booking, p.offer),
+  // O empurrão a meio do prazo. É o que mais reduz o ignorar.
+  ride_offer_reminder: (p) =>
+    sendRideOfferReminder(p.partner, p.booking, p.offer),
+  // A viagem mudou depois de ele a aceitar.
+  ride_changed: (p) => sendRideChanged(p.partner, p.booking, p.mudanca),
+  // O link de confirmação só pode ser gerado aqui: é este serviço
+  // que tem o cliente com service_role.
+  verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
+
+  /**
+   * Um parceiro à espera há dez minutos com um agente atribuído.
+   *
+   * Vai para o endereço de operações e não para o agente: o agente
+   * já viu o aviso no painel duas vezes. Este email existe para o
+   * caso de ele não estar a ver o painel de todo.
+   */
+  support_escalation: async (p) => {
+    const nome = p.partner_name || 'A partner';
+    const min = p.waiting_minutes || 10;
+
+    await notifyOps(`${nome} has been waiting ${min} minutes for a reply`, [
+      `Partner: ${nome}`,
+      `Waiting: ${min} minutes since their last message`,
+      'The conversation is assigned to an agent — it is not sitting in the queue.',
+      'Somebody took it and has not answered.',
+      `Chat: ${p.chat_id || '(unknown)'}`
+    ]);
+
+    return { sent: true };
+  }
+};
+
+app.post('/api/internal/email', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    console.warn('internal/email called with a bad secret');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { template, payload } = req.body || {};
+  const handler = INTERNAL_TEMPLATES[template];
+
+  if (!handler) {
+    return res.status(400).json({
+      error: `Unknown template: ${template}`,
+      allowed: Object.keys(INTERNAL_TEMPLATES)
+    });
+  }
+
+  try {
+    const result = await handler(payload || {});
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('internal/email error:', error);
+    return res.status(500).json({ error: 'Could not send that email.' });
+  }
+});
+
+/**
+ * Todos os modelos de email, de uma vez, para um endereço.
+ *
+ * Rever um email a um obriga a provocar cada acontecimento: pagar,
+ * cancelar, deixar uma cobrança falhar. Uma revisão de texto não
+ * devia custar isso.
+ *
+ * Demora cerca de doze segundos: há uma pausa entre cada um porque
+ * o Resend limita a dois por segundo no plano gratuito.
+ */
+app.post('/api/tasks/preview-emails', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
+  if (!to) {
+    return res.status(400).json({ error: 'Send { "to": "you@example.com" }.' });
+  }
+
+  const results = await previewAll(to);
+  const sent = results.filter((r) => r.sent).length;
+
+  console.log(`[email] preview: ${sent}/${results.length} sent to ${to}`);
+
+  return res.json({ to, sent, total: results.length, results });
+});
+
+/**
+ * Envia os dados do motorista de uma viagem.
+ *
+ * Usada pelo cron e pelo botão do admin. A ordem importa: um
+ * motorista posto à mão ganha sempre ao do parceiro, porque foi
+ * posto à mão precisamente quando o do parceiro não servia.
+ */
+async function sendDriverDetailsFor(ride) {
+  let driver = null;
+  let vehicle = null;
+
+  if (ride.manual_driver_name) {
+    driver = {
+      full_name: ride.manual_driver_name,
+      phone: ride.manual_driver_phone || ''
+    };
+    vehicle = ride.manual_vehicle
+      ? {
+          make: ride.manual_vehicle,
+          model: '',
+          plate: ride.manual_vehicle_plate || ''
+        }
+      : null;
+  } else if (ride.assigned_partner_id) {
+    const [driverRes, vehicleRes] = await Promise.all([
+      supabase.from('drivers').select('*')
+        .eq('partner_id', ride.assigned_partner_id)
+        .eq('status', 'active').order('created_at').limit(1).maybeSingle(),
+      supabase.from('partner_vehicles').select('*')
+        .eq('partner_id', ride.assigned_partner_id)
+        .eq('status', 'active')
+        .gte('seats', ride.passengers || 1)
+        .order('seats').limit(1).maybeSingle()
+    ]);
+
+    driver = driverRes.data;
+    vehicle = vehicleRes.data;
+  }
+
+  if (!driver) {
+    // Sem motorista não há email. É um problema real, porque a
+    // viagem é amanhã e o cliente não sabe quem o vai buscar.
+    await notifyOps('Ride tomorrow with no driver', [
+      `Reference: ${ride.booking_reference || ride.booking_id}`,
+      `Route: ${ride.pickup} to ${ride.dropoff}`,
+      `Pick-up: ${ride.booking_date} ${String(ride.booking_time || '').slice(0, 5)}`,
+      ride.assigned_partner_id
+        ? 'A partner took this ride but has no active driver on file.'
+        : 'Nobody has taken this ride.',
+      '',
+      'Add a driver by hand in the admin, or put the email on hold.'
+    ]);
+
+    return { sent: false, reason: 'no-driver' };
+  }
+
+  const result = await sendDriverDetails(ride, driver, vehicle);
+
+  if (result.sent) {
+    await supabase.from('bookings').update({
+      driver_details_sent_at: new Date().toISOString()
+    }).eq('id', ride.id);
+  }
+
+  return result;
+}
+
+/**
+ * Suster, libertar, ou pôr um motorista à mão.
+ *
+ * Uma rota para as três coisas porque são a mesma decisão vista de
+ * ângulos diferentes: quem vai buscar o cliente amanhã.
+ */
+app.post('/api/admin/ride-driver', async (req, res) => {
+  const { user: admin, error: adminError } = await requireAdmin(req);
+  if (!admin) return res.status(403).json({ error: adminError || 'Administrator access required.' });
+
+  const { booking_id, action, driver, reason } = req.body || {};
+
+  if (!booking_id || !['hold', 'release', 'manual', 'send'].includes(action)) {
+    return res.status(400).json({
+      error: 'Send booking_id and action: hold, release, manual or send.'
+    });
+  }
+
+  try {
+    if (action === 'hold') {
+      await supabase.from('bookings').update({
+        driver_email_hold: true,
+        driver_email_hold_reason: reason || null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      return res.json({ success: true, held: true });
+    }
+
+    if (action === 'release') {
+      await supabase.from('bookings').update({
+        driver_email_hold: false,
+        driver_email_hold_reason: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      return res.json({ success: true, held: false });
+    }
+
+    if (action === 'manual') {
+      if (!driver?.name || !driver?.phone) {
+        return res.status(400).json({
+          error: 'A name and a phone number are the minimum — the passenger calls that number.'
+        });
+      }
+
+      await supabase.from('bookings').update({
+        manual_driver_name: driver.name,
+        manual_driver_phone: driver.phone,
+        manual_vehicle: driver.vehicle || null,
+        manual_vehicle_plate: driver.plate || null,
+        manual_driver_note: driver.note || null,
+        // Pôr um motorista à mão levanta a retenção: a razão para a
+        // suspender era não haver motorista, e agora há.
+        driver_email_hold: false,
+        driver_email_hold_reason: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', booking_id);
+
+      console.log('Manual driver set:', { by: admin.email, booking: booking_id });
+
+      return res.json({ success: true });
+    }
+
+    // send
+    const { data: ride } = await supabase.from('bookings')
+      .select('*').eq('id', booking_id).maybeSingle();
+
+    if (!ride) return res.status(404).json({ error: 'That booking no longer exists.' });
+
+    // O envio manual ignora a marca de já enviado: às vezes é
+    // preciso reenviar porque o motorista mudou.
+    await supabase.from('bookings').update({
+      driver_details_sent_at: null
+    }).eq('id', booking_id);
+
+    const result = await sendDriverDetailsFor({ ...ride, driver_details_sent_at: null });
+
+    if (!result.sent) {
+      return res.status(400).json({
+        error: result.reason === 'no-driver'
+          ? 'There is no driver for this ride yet. Add one by hand first.'
+          : (result.reason || 'Could not send.')
+      });
+    }
+
+    return res.json({ success: true, sent: true });
+  } catch (error) {
+    console.error('admin/ride-driver error:', error);
+    return res.status(500).json({ error: 'Could not update that ride.' });
+  }
+});
+
+/**
+ * Os extratos do mês passado.
+ *
+ * Corre uma vez por mês, no dia 1. Se correr duas vezes não faz mal:
+ * a chave de idempotência inclui o mês, e o segundo envio é
+ * descartado antes de sair.
+ *
+ * cron-job.org → POST /api/tasks/monthly-statements
+ *                dia 1 de cada mês, 09:30
+ *
+ * Aceita { "month": "2026-07" } para reenviar um mês concreto —
+ * útil quando alguém pede o extrato de há três meses.
+ */
+app.post('/api/tasks/monthly-statements', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  // Por omissão, o mês passado: no dia 1 é esse que interessa.
+  let month = req.body && req.body.month;
+
+  if (!month) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 1);
+    month = d.toISOString().slice(0, 7);
+  }
+
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: 'month must look like 2026-07.' });
+  }
+
+  const from = `${month}-01`;
+  const to = new Date(month + '-01T12:00:00');
+  to.setMonth(to.getMonth() + 1);
+  const until = to.toISOString().slice(0, 10);
+
+  const out = { month, partners: 0, agents: 0, skipped: 0, errors: [] };
+
+  // ---------- parceiros ----------
+  try {
+    const { data: rides, error } = await supabase
+      .from('bookings')
+      .select('id, booking_id, booking_reference, pickup, dropoff, booking_date, ' +
+              'booking_time, driver_payout, driver_payout_eur, currency, assigned_partner_id')
+      .not('assigned_partner_id', 'is', null)
+      .neq('status', 'cancelled')
+      .gte('booking_date', from)
+      .lt('booking_date', until)
+      .order('booking_date');
+
+    if (error) throw error;
+
+    const byPartner = new Map();
+
+    for (const ride of (rides || [])) {
+      if (!byPartner.has(ride.assigned_partner_id)) {
+        byPartner.set(ride.assigned_partner_id, []);
+      }
+      byPartner.get(ride.assigned_partner_id).push(ride);
+    }
+
+    for (const [partnerId, list] of byPartner) {
+      const { data: partner } = await supabase
+        .from('driver_partners')
+        .select('id, email, legal_name, trading_name, payout_iban, status')
+        .eq('id', partnerId).maybeSingle();
+
+      if (!partner?.email) {
+        out.skipped += 1;
+        continue;
+      }
+
+      // Em euros, à taxa do dia de cada viagem — nunca à de hoje.
+      const total = list.reduce((t, r) =>
+        t + Number(r.driver_payout_eur || r.driver_payout || 0), 0);
+
+      const result = await sendPartnerStatement(partner, month, list, total);
+      if (result.sent) out.partners += 1;
+
+      if (!partner.payout_iban) {
+        await notifyOps('Partner with no IBAN has money owed', [
+          `Partner: ${partner.legal_name} (${partner.email})`,
+          `Month: ${month}`,
+          `Rides: ${list.length}`,
+          `Owed: EUR ${total.toFixed(2)}`,
+          '',
+          'They cannot be paid until they add payout details.'
+        ]);
+      }
+    }
+  } catch (error) {
+    out.errors.push('partners: ' + error.message);
+  }
+
+  // ---------- agências ----------
+  try {
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select('id, booking_id, booking_reference, booking_date, passenger_name, ' +
+              'price, price_eur, agent_gross_price, currency, agent_reference, booked_by')
+      .not('booked_by', 'is', null)
+      .neq('status', 'cancelled')
+      .gte('booking_date', from)
+      .lt('booking_date', until)
+      .order('booking_date');
+
+    if (error) throw error;
+
+    const byAgent = new Map();
+
+    for (const b of (bookings || [])) {
+      if (!byAgent.has(b.booked_by)) byAgent.set(b.booked_by, []);
+      byAgent.get(b.booked_by).push(b);
+    }
+
+    for (const [agentId, list] of byAgent) {
+      const { data: agent } = await supabase
+        .from('travel_agents')
+        .select('id, email, agency_name, commission, status')
+        .eq('id', agentId).maybeSingle();
+
+      if (!agent?.email) {
+        out.skipped += 1;
+        continue;
+      }
+
+      const paid = list.reduce((t, b) => t + Number(b.price_eur || b.price || 0), 0);
+      const gross = list.reduce((t, b) =>
+        t + Number(b.agent_gross_price || b.price_eur || b.price || 0), 0);
+
+      const result = await sendAgentStatement(agent, month, list, { paid, gross });
+      if (result.sent) out.agents += 1;
+    }
+  } catch (error) {
+    out.errors.push('agents: ' + error.message);
+  }
+
+  console.log('[monthly-statements]', out);
+
+  // Um resumo para ti, para saberes que correu sem ires aos logs.
+  await notifyOps(`Statements sent for ${month}`, [
+    `${out.partners} partner statement(s)`,
+    `${out.agents} agency statement(s)`,
+    out.skipped ? `${out.skipped} skipped (no email on file)` : '',
+    out.errors.length ? 'Errors: ' + out.errors.join(' · ') : ''
+  ].filter(Boolean));
+
+  return res.json({ ok: true, ...out });
+});
+
+/**
+ * As viagens sem motorista.
+ *
+ * Corre de dez em dez minutos, não uma vez por dia. Uma venda às
+ * 23h para as 8h da manhã não aparece num resumo das 18h — e às 6h
+ * já é tarde para procurar parceiro.
+ *
+ * A tolerância antes de avisar depende de quanto falta: meia hora
+ * para viagens dentro de 12 horas, seis horas para as de daqui a
+ * semanas. Sem isso, cada venda disparava um alarme antes de a
+ * cascata ter tempo de encontrar alguém.
+ */
+app.post('/api/tasks/driver-watch', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const { data: semMotorista, error } = await supabase
+      .rpc('bookings_needing_driver');
+
+    if (error) throw error;
+
+    const lista = semMotorista || [];
+
+    if (!lista.length) {
+      return res.json({ ok: true, alerts: 0 });
+    }
+
+    await telegramNoDriver(lista);
+
+    /**
+     * Marcar depois de avisar.
+     *
+     * Uma reserva avisada não volta a disparar. Se voltasse, uma
+     * viagem sem motorista durante três dias mandaria um alarme de
+     * dez em dez minutos — e ao fim de uma hora ninguém os lê.
+     */
+    for (const b of lista) {
+      await supabase.rpc('mark_no_driver_alerted', { p_booking_id: b.booking_id });
+    }
+
+    return res.json({
+      ok: true,
+      alerts: lista.length,
+      critical: lista.filter((b) => b.urgency === 'critical').length
+    });
+  } catch (error) {
+    console.error('driver-watch:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * O resumo do dia, à meia-noite.
+ *
+ * Duas coisas diferentes que se confundem: o que ENTROU hoje
+ * (vendas) e o que se FEZ hoje (viagens operadas). Uma reserva
+ * pode entrar hoje para daqui a três semanas, e uma viagem de hoje
+ * pode ter sido vendida em agosto.
+ *
+ * Não é um alarme — os alarmes já dispararam quando havia razão.
+ */
+app.post('/api/tasks/day-summary', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const { data } = await supabase.rpc('day_summary', { p_day: null });
+
+    await telegramDaySummary(data);
+
+    return res.json({ ok: true, ...(data || {}) });
+  } catch (error) {
+    console.error('day-summary:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * O motorista aceitou: a viagem passa a azul na agenda.
+ *
+ * Chamada pelo serviço de drivers. O calendário vive aqui porque é
+ * aqui que estão as credenciais do Google — o outro serviço só
+ * avisa.
+ */
+app.post('/api/internal/calendar-sync', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id, partner_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    const { data: partner } = partner_id
+      ? await supabase
+          .from('driver_partners')
+          .select('trading_name, legal_name')
+          .eq('id', partner_id)
+          .maybeSingle()
+      : { data: null };
+
+    const result = await calendarUpsert(booking, partner);
+
+    return res.json(result);
+  } catch (error) {
+    console.error('calendar-sync:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * Correr uma tarefa automática e avisar se falhar.
+ *
+ * As tarefas corriam com um try/catch que registava o erro na
+ * consola do Render — onde ninguém olha. O Google Calendar falhou
+ * uma semana inteira em silêncio, e só se descobriu quando uma
+ * reserva não apareceu na agenda.
+ *
+ * Agora cada falha vai para o canal de alarmes, com som. E quando
+ * a tarefa voltar a funcionar, avisa também: sem isso, alguém vai
+ * investigar um problema que já se resolveu.
+ */
 
 app.get('/api/exchange-rates', async (req, res) => {
   const { rates, source } = await loadExchangeRates();
@@ -2570,6 +3306,22 @@ app.post('/api/stripe-webhook', async (req, res) => {
      * dele. Nos registos do Render fica só para quem gere o
      * serviço.
      */
+    /**
+     * Uma assinatura recusada é grave.
+     *
+     * Ou o segredo está errado — e nesse caso NENHUMA reserva está
+     * a ser gravada — ou alguém está a tentar forjar pagamentos.
+     *
+     * Foi o que aconteceu semanas atrás: o segredo errado, o
+     * webhook a devolver 400 a tudo, e a descoberta só quando um
+     * cliente perguntou pela reserva.
+     */
+    telegramTaskFailed('stripe webhook',
+      `Signature rejected: ${ultimoErro?.message || 'unknown'}`,
+      'Either the webhook secret is wrong — in which case no booking ' +
+      'is being saved — or somebody is forging requests.'
+    ).catch(() => {});
+
     console.error('Webhook signature failed.', {
       secrets_configured: segredos.length,
       // Só os primeiros caracteres: chega para confirmar QUAL é
@@ -3239,674 +3991,6 @@ app.post('/api/stripe-webhook', async (req, res) => {
  * um campo "failures" com conteúdo, avisa. Se for um sucesso
  * depois de uma falha, avisa também.
  */
-app.use('/api/tasks', (req, res, next) => {
-  const nome = req.path.replace(/^\//, '') || 'task';
-
-  // Os testes não valem alarme: são corridos à mão de propósito.
-  if (/test|preview/.test(nome)) return next();
-
-  const jsonOriginal = res.json.bind(res);
-
-  res.json = (body) => {
-    try {
-      const falhas = body?.failures;
-
-      if (res.statusCode >= 400) {
-        telegramTaskFailed(nome,
-          body?.error || `HTTP ${res.statusCode}`).catch(() => {});
-      } else if (Array.isArray(falhas) && falhas.length) {
-        telegramTaskFailed(nome,
-          falhas.map((f) => `${f.part}: ${f.error}`).join('\n')).catch(() => {});
-      } else if (body?.ok === false) {
-        telegramTaskFailed(nome, body.reason || 'returned ok:false').catch(() => {});
-      } else {
-        telegramTaskRecovered(nome).catch(() => {});
-      }
-    } catch (e) {
-      // Um alarme que falha não deve travar a resposta.
-    }
-
-    return jsonOriginal(body);
-  };
-
-  next();
-});
-
-
-/**
- * Testar o email sem fazer uma reserva.
- *
- * Existe porque diagnosticar "não recebi nada" através de uma
- * reserva real mistura três coisas que podem falhar: o Stripe, o
- * webhook e o email. Isto testa só a última.
- *
- * Protegido pelo mesmo segredo do cron: não é uma rota pública.
- */
-app.post('/api/tasks/test-email', async (req, res) => {
-  if (!process.env.CRON_SECRET) {
-    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
-  }
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
-  if (!to) {
-    return res.status(400).json({ error: 'Send { "to": "you@example.com" } or set EMAIL_OPERATIONS.' });
-  }
-
-  const checks = {
-    resend_key: Boolean(process.env.RESEND_API_KEY),
-    from: process.env.EMAIL_FROM_BOOKINGS || process.env.EMAIL_FROM || '(default)',
-    reply_to: process.env.EMAIL_REPLY_TO || '(default)',
-    email_log_table: null,
-    delivered: false,
-    error: null
-  };
-
-  // A email_log existe? É a causa mais provável de nada sair: sem a
-  // tabela, o registo falha e o envio é abandonado antes de começar.
-  try {
-    const { error } = await supabase.from('email_log').select('id').limit(1);
-    checks.email_log_table = error ? `MISSING — ${error.message}` : 'ok';
-  } catch (error) {
-    checks.email_log_table = `MISSING — ${error.message}`;
-  }
-
-  // Envio direto, sem passar pelo registo: queremos saber se o
-  // Resend aceita, separado de tudo o resto.
-  try {
-    const result = await notifyOps('Test email', [
-      'If you are reading this, Resend is working.',
-      `Sent at ${new Date().toISOString()}`,
-      `From: ${checks.from}`
-    ], to);
-    checks.delivered = result.sent;
-    if (!result.sent) checks.error = result.reason || 'unknown';
-  } catch (error) {
-    checks.error = error.message;
-  }
-
-  console.log('[email] test run:', checks);
-
-  return res.json({ to, ...checks });
-});
-
-/**
- * O correio de todos os dias.
- *
- * Uma só chamada trata do que depende do calendário: os detalhes do
- * motorista na véspera, os documentos a expirar, e o aviso interno
- * das viagens que ninguém quis.
- *
- * Corre uma vez por dia, de manhã. Não de hora a hora: um lembrete
- * que chega às três da manhã é pior do que nenhum.
- *
- * cron-job.org → POST /api/tasks/daily-emails, às 09:15
- */
-/**
- * Envio de emails para o serviço dos motoristas.
- *
- * O emailService vive aqui e só aqui. O outro serviço pede a esta
- * rota em vez de ter uma cópia do ficheiro — duas cópias divergem
- * sempre, e no dia em que divergem um dos dois manda o texto antigo.
- *
- * A proteção é o CRON_SECRET, mas não é só isso: os modelos são uma
- * LISTA FECHADA. Quem tivesse o segredo não poderia mandar um email
- * qualquer a partir do nosso domínio — apenas disparar um destes
- * três, que são inofensivos fora de contexto.
- */
-const INTERNAL_TEMPLATES = {
-  partner_received: (p) => sendPartnerApplicationReceived(p.partner),
-  partner_decision: (p) => sendPartnerDecision(p.partner, p.decision, p.reason),
-  ride_confirmed: (p) => sendRideConfirmedToPartner(p.partner, p.booking),
-  // A oferta com prazo, mandada pelo serviço de drivers quando a
-  // cascata avança. Sem ela, só o primeiro parceiro de cada viagem
-  // era avisado.
-  ride_offer: (p) => sendRideOffer(p.partner, p.booking, p.offer),
-  // O empurrão a meio do prazo. É o que mais reduz o ignorar.
-  ride_offer_reminder: (p) =>
-    sendRideOfferReminder(p.partner, p.booking, p.offer),
-  // A viagem mudou depois de ele a aceitar.
-  ride_changed: (p) => sendRideChanged(p.partner, p.booking, p.mudanca),
-  // O link de confirmação só pode ser gerado aqui: é este serviço
-  // que tem o cliente com service_role.
-  verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
-
-  /**
-   * Um parceiro à espera há dez minutos com um agente atribuído.
-   *
-   * Vai para o endereço de operações e não para o agente: o agente
-   * já viu o aviso no painel duas vezes. Este email existe para o
-   * caso de ele não estar a ver o painel de todo.
-   */
-  support_escalation: async (p) => {
-    const nome = p.partner_name || 'A partner';
-    const min = p.waiting_minutes || 10;
-
-    await notifyOps(`${nome} has been waiting ${min} minutes for a reply`, [
-      `Partner: ${nome}`,
-      `Waiting: ${min} minutes since their last message`,
-      'The conversation is assigned to an agent — it is not sitting in the queue.',
-      'Somebody took it and has not answered.',
-      `Chat: ${p.chat_id || '(unknown)'}`
-    ]);
-
-    return { sent: true };
-  }
-};
-
-app.post('/api/internal/email', async (req, res) => {
-  if (!process.env.CRON_SECRET) {
-    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
-  }
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    console.warn('internal/email called with a bad secret');
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  const { template, payload } = req.body || {};
-  const handler = INTERNAL_TEMPLATES[template];
-
-  if (!handler) {
-    return res.status(400).json({
-      error: `Unknown template: ${template}`,
-      allowed: Object.keys(INTERNAL_TEMPLATES)
-    });
-  }
-
-  try {
-    const result = await handler(payload || {});
-    return res.json({ ok: true, ...result });
-  } catch (error) {
-    console.error('internal/email error:', error);
-    return res.status(500).json({ error: 'Could not send that email.' });
-  }
-});
-
-/**
- * Todos os modelos de email, de uma vez, para um endereço.
- *
- * Rever um email a um obriga a provocar cada acontecimento: pagar,
- * cancelar, deixar uma cobrança falhar. Uma revisão de texto não
- * devia custar isso.
- *
- * Demora cerca de doze segundos: há uma pausa entre cada um porque
- * o Resend limita a dois por segundo no plano gratuito.
- */
-app.post('/api/tasks/preview-emails', async (req, res) => {
-  if (!process.env.CRON_SECRET) {
-    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
-  }
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  const to = (req.body && req.body.to) || process.env.EMAIL_OPERATIONS;
-  if (!to) {
-    return res.status(400).json({ error: 'Send { "to": "you@example.com" }.' });
-  }
-
-  const results = await previewAll(to);
-  const sent = results.filter((r) => r.sent).length;
-
-  console.log(`[email] preview: ${sent}/${results.length} sent to ${to}`);
-
-  return res.json({ to, sent, total: results.length, results });
-});
-
-/**
- * Envia os dados do motorista de uma viagem.
- *
- * Usada pelo cron e pelo botão do admin. A ordem importa: um
- * motorista posto à mão ganha sempre ao do parceiro, porque foi
- * posto à mão precisamente quando o do parceiro não servia.
- */
-async function sendDriverDetailsFor(ride) {
-  let driver = null;
-  let vehicle = null;
-
-  if (ride.manual_driver_name) {
-    driver = {
-      full_name: ride.manual_driver_name,
-      phone: ride.manual_driver_phone || ''
-    };
-    vehicle = ride.manual_vehicle
-      ? {
-          make: ride.manual_vehicle,
-          model: '',
-          plate: ride.manual_vehicle_plate || ''
-        }
-      : null;
-  } else if (ride.assigned_partner_id) {
-    const [driverRes, vehicleRes] = await Promise.all([
-      supabase.from('drivers').select('*')
-        .eq('partner_id', ride.assigned_partner_id)
-        .eq('status', 'active').order('created_at').limit(1).maybeSingle(),
-      supabase.from('partner_vehicles').select('*')
-        .eq('partner_id', ride.assigned_partner_id)
-        .eq('status', 'active')
-        .gte('seats', ride.passengers || 1)
-        .order('seats').limit(1).maybeSingle()
-    ]);
-
-    driver = driverRes.data;
-    vehicle = vehicleRes.data;
-  }
-
-  if (!driver) {
-    // Sem motorista não há email. É um problema real, porque a
-    // viagem é amanhã e o cliente não sabe quem o vai buscar.
-    await notifyOps('Ride tomorrow with no driver', [
-      `Reference: ${ride.booking_reference || ride.booking_id}`,
-      `Route: ${ride.pickup} to ${ride.dropoff}`,
-      `Pick-up: ${ride.booking_date} ${String(ride.booking_time || '').slice(0, 5)}`,
-      ride.assigned_partner_id
-        ? 'A partner took this ride but has no active driver on file.'
-        : 'Nobody has taken this ride.',
-      '',
-      'Add a driver by hand in the admin, or put the email on hold.'
-    ]);
-
-    return { sent: false, reason: 'no-driver' };
-  }
-
-  const result = await sendDriverDetails(ride, driver, vehicle);
-
-  if (result.sent) {
-    await supabase.from('bookings').update({
-      driver_details_sent_at: new Date().toISOString()
-    }).eq('id', ride.id);
-  }
-
-  return result;
-}
-
-/**
- * Suster, libertar, ou pôr um motorista à mão.
- *
- * Uma rota para as três coisas porque são a mesma decisão vista de
- * ângulos diferentes: quem vai buscar o cliente amanhã.
- */
-app.post('/api/admin/ride-driver', async (req, res) => {
-  const { user: admin, error: adminError } = await requireAdmin(req);
-  if (!admin) return res.status(403).json({ error: adminError || 'Administrator access required.' });
-
-  const { booking_id, action, driver, reason } = req.body || {};
-
-  if (!booking_id || !['hold', 'release', 'manual', 'send'].includes(action)) {
-    return res.status(400).json({
-      error: 'Send booking_id and action: hold, release, manual or send.'
-    });
-  }
-
-  try {
-    if (action === 'hold') {
-      await supabase.from('bookings').update({
-        driver_email_hold: true,
-        driver_email_hold_reason: reason || null,
-        updated_at: new Date().toISOString()
-      }).eq('id', booking_id);
-
-      return res.json({ success: true, held: true });
-    }
-
-    if (action === 'release') {
-      await supabase.from('bookings').update({
-        driver_email_hold: false,
-        driver_email_hold_reason: null,
-        updated_at: new Date().toISOString()
-      }).eq('id', booking_id);
-
-      return res.json({ success: true, held: false });
-    }
-
-    if (action === 'manual') {
-      if (!driver?.name || !driver?.phone) {
-        return res.status(400).json({
-          error: 'A name and a phone number are the minimum — the passenger calls that number.'
-        });
-      }
-
-      await supabase.from('bookings').update({
-        manual_driver_name: driver.name,
-        manual_driver_phone: driver.phone,
-        manual_vehicle: driver.vehicle || null,
-        manual_vehicle_plate: driver.plate || null,
-        manual_driver_note: driver.note || null,
-        // Pôr um motorista à mão levanta a retenção: a razão para a
-        // suspender era não haver motorista, e agora há.
-        driver_email_hold: false,
-        driver_email_hold_reason: null,
-        updated_at: new Date().toISOString()
-      }).eq('id', booking_id);
-
-      console.log('Manual driver set:', { by: admin.email, booking: booking_id });
-
-      return res.json({ success: true });
-    }
-
-    // send
-    const { data: ride } = await supabase.from('bookings')
-      .select('*').eq('id', booking_id).maybeSingle();
-
-    if (!ride) return res.status(404).json({ error: 'That booking no longer exists.' });
-
-    // O envio manual ignora a marca de já enviado: às vezes é
-    // preciso reenviar porque o motorista mudou.
-    await supabase.from('bookings').update({
-      driver_details_sent_at: null
-    }).eq('id', booking_id);
-
-    const result = await sendDriverDetailsFor({ ...ride, driver_details_sent_at: null });
-
-    if (!result.sent) {
-      return res.status(400).json({
-        error: result.reason === 'no-driver'
-          ? 'There is no driver for this ride yet. Add one by hand first.'
-          : (result.reason || 'Could not send.')
-      });
-    }
-
-    return res.json({ success: true, sent: true });
-  } catch (error) {
-    console.error('admin/ride-driver error:', error);
-    return res.status(500).json({ error: 'Could not update that ride.' });
-  }
-});
-
-/**
- * Os extratos do mês passado.
- *
- * Corre uma vez por mês, no dia 1. Se correr duas vezes não faz mal:
- * a chave de idempotência inclui o mês, e o segundo envio é
- * descartado antes de sair.
- *
- * cron-job.org → POST /api/tasks/monthly-statements
- *                dia 1 de cada mês, 09:30
- *
- * Aceita { "month": "2026-07" } para reenviar um mês concreto —
- * útil quando alguém pede o extrato de há três meses.
- */
-app.post('/api/tasks/monthly-statements', async (req, res) => {
-  if (!process.env.CRON_SECRET) {
-    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
-  }
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  // Por omissão, o mês passado: no dia 1 é esse que interessa.
-  let month = req.body && req.body.month;
-
-  if (!month) {
-    const d = new Date();
-    d.setMonth(d.getMonth() - 1);
-    month = d.toISOString().slice(0, 7);
-  }
-
-  if (!/^\d{4}-\d{2}$/.test(month)) {
-    return res.status(400).json({ error: 'month must look like 2026-07.' });
-  }
-
-  const from = `${month}-01`;
-  const to = new Date(month + '-01T12:00:00');
-  to.setMonth(to.getMonth() + 1);
-  const until = to.toISOString().slice(0, 10);
-
-  const out = { month, partners: 0, agents: 0, skipped: 0, errors: [] };
-
-  // ---------- parceiros ----------
-  try {
-    const { data: rides, error } = await supabase
-      .from('bookings')
-      .select('id, booking_id, booking_reference, pickup, dropoff, booking_date, ' +
-              'booking_time, driver_payout, driver_payout_eur, currency, assigned_partner_id')
-      .not('assigned_partner_id', 'is', null)
-      .neq('status', 'cancelled')
-      .gte('booking_date', from)
-      .lt('booking_date', until)
-      .order('booking_date');
-
-    if (error) throw error;
-
-    const byPartner = new Map();
-
-    for (const ride of (rides || [])) {
-      if (!byPartner.has(ride.assigned_partner_id)) {
-        byPartner.set(ride.assigned_partner_id, []);
-      }
-      byPartner.get(ride.assigned_partner_id).push(ride);
-    }
-
-    for (const [partnerId, list] of byPartner) {
-      const { data: partner } = await supabase
-        .from('driver_partners')
-        .select('id, email, legal_name, trading_name, payout_iban, status')
-        .eq('id', partnerId).maybeSingle();
-
-      if (!partner?.email) {
-        out.skipped += 1;
-        continue;
-      }
-
-      // Em euros, à taxa do dia de cada viagem — nunca à de hoje.
-      const total = list.reduce((t, r) =>
-        t + Number(r.driver_payout_eur || r.driver_payout || 0), 0);
-
-      const result = await sendPartnerStatement(partner, month, list, total);
-      if (result.sent) out.partners += 1;
-
-      if (!partner.payout_iban) {
-        await notifyOps('Partner with no IBAN has money owed', [
-          `Partner: ${partner.legal_name} (${partner.email})`,
-          `Month: ${month}`,
-          `Rides: ${list.length}`,
-          `Owed: EUR ${total.toFixed(2)}`,
-          '',
-          'They cannot be paid until they add payout details.'
-        ]);
-      }
-    }
-  } catch (error) {
-    out.errors.push('partners: ' + error.message);
-  }
-
-  // ---------- agências ----------
-  try {
-    const { data: bookings, error } = await supabase
-      .from('bookings')
-      .select('id, booking_id, booking_reference, booking_date, passenger_name, ' +
-              'price, price_eur, agent_gross_price, currency, agent_reference, booked_by')
-      .not('booked_by', 'is', null)
-      .neq('status', 'cancelled')
-      .gte('booking_date', from)
-      .lt('booking_date', until)
-      .order('booking_date');
-
-    if (error) throw error;
-
-    const byAgent = new Map();
-
-    for (const b of (bookings || [])) {
-      if (!byAgent.has(b.booked_by)) byAgent.set(b.booked_by, []);
-      byAgent.get(b.booked_by).push(b);
-    }
-
-    for (const [agentId, list] of byAgent) {
-      const { data: agent } = await supabase
-        .from('travel_agents')
-        .select('id, email, agency_name, commission, status')
-        .eq('id', agentId).maybeSingle();
-
-      if (!agent?.email) {
-        out.skipped += 1;
-        continue;
-      }
-
-      const paid = list.reduce((t, b) => t + Number(b.price_eur || b.price || 0), 0);
-      const gross = list.reduce((t, b) =>
-        t + Number(b.agent_gross_price || b.price_eur || b.price || 0), 0);
-
-      const result = await sendAgentStatement(agent, month, list, { paid, gross });
-      if (result.sent) out.agents += 1;
-    }
-  } catch (error) {
-    out.errors.push('agents: ' + error.message);
-  }
-
-  console.log('[monthly-statements]', out);
-
-  // Um resumo para ti, para saberes que correu sem ires aos logs.
-  await notifyOps(`Statements sent for ${month}`, [
-    `${out.partners} partner statement(s)`,
-    `${out.agents} agency statement(s)`,
-    out.skipped ? `${out.skipped} skipped (no email on file)` : '',
-    out.errors.length ? 'Errors: ' + out.errors.join(' · ') : ''
-  ].filter(Boolean));
-
-  return res.json({ ok: true, ...out });
-});
-
-/**
- * As viagens sem motorista.
- *
- * Corre de dez em dez minutos, não uma vez por dia. Uma venda às
- * 23h para as 8h da manhã não aparece num resumo das 18h — e às 6h
- * já é tarde para procurar parceiro.
- *
- * A tolerância antes de avisar depende de quanto falta: meia hora
- * para viagens dentro de 12 horas, seis horas para as de daqui a
- * semanas. Sem isso, cada venda disparava um alarme antes de a
- * cascata ter tempo de encontrar alguém.
- */
-app.post('/api/tasks/driver-watch', async (req, res) => {
-  if (!process.env.CRON_SECRET) {
-    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
-  }
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  try {
-    const { data: semMotorista, error } = await supabase
-      .rpc('bookings_needing_driver');
-
-    if (error) throw error;
-
-    const lista = semMotorista || [];
-
-    if (!lista.length) {
-      return res.json({ ok: true, alerts: 0 });
-    }
-
-    await telegramNoDriver(lista);
-
-    /**
-     * Marcar depois de avisar.
-     *
-     * Uma reserva avisada não volta a disparar. Se voltasse, uma
-     * viagem sem motorista durante três dias mandaria um alarme de
-     * dez em dez minutos — e ao fim de uma hora ninguém os lê.
-     */
-    for (const b of lista) {
-      await supabase.rpc('mark_no_driver_alerted', { p_booking_id: b.booking_id });
-    }
-
-    return res.json({
-      ok: true,
-      alerts: lista.length,
-      critical: lista.filter((b) => b.urgency === 'critical').length
-    });
-  } catch (error) {
-    console.error('driver-watch:', error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-
-/**
- * O resumo do dia, à meia-noite.
- *
- * Duas coisas diferentes que se confundem: o que ENTROU hoje
- * (vendas) e o que se FEZ hoje (viagens operadas). Uma reserva
- * pode entrar hoje para daqui a três semanas, e uma viagem de hoje
- * pode ter sido vendida em agosto.
- *
- * Não é um alarme — os alarmes já dispararam quando havia razão.
- */
-app.post('/api/tasks/day-summary', async (req, res) => {
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  try {
-    const { data } = await supabase.rpc('day_summary', { p_day: null });
-
-    await telegramDaySummary(data);
-
-    return res.json({ ok: true, ...(data || {}) });
-  } catch (error) {
-    console.error('day-summary:', error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-
-/**
- * O motorista aceitou: a viagem passa a azul na agenda.
- *
- * Chamada pelo serviço de drivers. O calendário vive aqui porque é
- * aqui que estão as credenciais do Google — o outro serviço só
- * avisa.
- */
-app.post('/api/internal/calendar-sync', async (req, res) => {
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  const { booking_id, partner_id } = req.body || {};
-  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
-
-  try {
-    const { data: booking } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', booking_id)
-      .maybeSingle();
-
-    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
-
-    const { data: partner } = partner_id
-      ? await supabase
-          .from('driver_partners')
-          .select('trading_name, legal_name')
-          .eq('id', partner_id)
-          .maybeSingle()
-      : { data: null };
-
-    const result = await calendarUpsert(booking, partner);
-
-    return res.json(result);
-  } catch (error) {
-    console.error('calendar-sync:', error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-
-/**
- * Correr uma tarefa automática e avisar se falhar.
- *
- * As tarefas corriam com um try/catch que registava o erro na
- * consola do Render — onde ninguém olha. O Google Calendar falhou
- * uma semana inteira em silêncio, e só se descobriu quando uma
- * reserva não apareceu na agenda.
- *
- * Agora cada falha vai para o canal de alarmes, com som. E quando
- * a tarefa voltar a funcionar, avisa também: sem isso, alguém vai
- * investigar um problema que já se resolveu.
- */
 async function tarefa(nome, fn) {
   try {
     const r = await fn();
@@ -4524,7 +4608,35 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
 });
 
 
-/** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
+/**
+ * Um alarme vindo do serviço de drivers.
+ *
+ * Esse serviço não tem Telegram — e não deve ter: duas cópias das
+ * credenciais é um sítio a mais onde podem vazar.
+ *
+ * Manda o alarme para aqui, e daqui vai para o canal. Uma chamada
+ * a mais numa coisa que só acontece quando algo corre mal.
+ */
+app.post('/api/internal/alarm', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { task, error, detail, recovered } = req.body || {};
+
+  if (!task) return res.status(400).json({ error: 'Send task.' });
+
+  if (recovered) {
+    await telegramTaskRecovered(task).catch(() => {});
+  } else {
+    await telegramTaskFailed(task, error || 'unknown', detail).catch(() => {});
+  }
+
+  return res.json({ ok: true });
+});
+
+
+/** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
 app.get('/api/tasks/flights-test', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
