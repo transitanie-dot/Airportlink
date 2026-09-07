@@ -22,6 +22,14 @@ import {
  * história sem ninguém lhe tocar.
  */
 import { calendarUpsert, calendarCancel, calendarTest } from './calendar.js';
+/**
+ * A hora a que o avião aterrou.
+ *
+ * O relógio da espera começa aí, não na hora que o cliente
+ * escreveu — senão um voo com duas horas de atraso queima a hora
+ * grátis antes de ele pisar o chão.
+ */
+import { flightLanding, flightsTest } from './flights.js';
 import cors from 'cors';
 import Stripe from 'stripe';
 // O cliente e as funções de identidade vivem no supabaseclient.js.
@@ -3996,6 +4004,84 @@ app.post('/api/internal/driver-arrived', async (req, res) => {
     console.error('driver-arrived:', error);
     return res.status(500).json({ error: error.message });
   }
+});
+
+
+/**
+ * A hora de aterragem, quando ela faz falta.
+ *
+ * Chamada pelo portal de motoristas antes de calcular a espera —
+ * ao abrir o ecrã e ao dar o código.
+ *
+ * Estava presa ao botão de "cheguei", e isso era um erro: um
+ * motorista que fosse direto ao código nunca a disparava, e o
+ * cliente de um voo atrasado pagava espera que não devia.
+ *
+ * Agora o sistema vai buscar a informação quando precisa dela, não
+ * quando alguém lhe diz.
+ */
+app.post('/api/internal/flight-landing', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { booking_id } = req.body || {};
+  if (!booking_id) return res.status(400).json({ error: 'Send booking_id.' });
+
+  try {
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('id, booking_reference, flight_number, booking_date, flight_landed_at')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+    // Já sabemos, ou não há voo. Em qualquer dos casos não se
+    // gasta uma consulta.
+    if (booking.flight_landed_at) {
+      return res.json({ ok: true, cached: true, landed_at: booking.flight_landed_at });
+    }
+
+    if (!booking.flight_number) {
+      return res.json({ ok: true, no_flight: true });
+    }
+
+    const voo = await flightLanding(booking.flight_number, booking.booking_date);
+
+    /**
+     * Só se grava a hora CONFIRMADA.
+     *
+     * Uma previsão muda, e cobrar espera com base numa previsão
+     * seria injusto — o cliente pagaria por um atraso que afinal
+     * não aconteceu.
+     */
+    if (voo?.landed_at && voo.confirmed) {
+      await supabase.from('bookings')
+        .update({ flight_landed_at: voo.landed_at })
+        .eq('id', booking.id);
+
+      console.log('[flights]', booking.booking_reference,
+        booking.flight_number, 'landed', voo.landed_at);
+
+      return res.json({ ok: true, landed_at: voo.landed_at });
+    }
+
+    return res.json({ ok: true, not_landed_yet: true, status: voo?.status });
+  } catch (error) {
+    console.error('flight-landing:', error);
+    return res.json({ ok: false, reason: error.message });
+  }
+});
+
+
+/** Confirmar que a consulta de voos funciona. */
+app.get('/api/tasks/flights-test', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  return res.json(await flightsTest());
 });
 
 
