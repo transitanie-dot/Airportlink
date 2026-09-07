@@ -895,6 +895,95 @@ export async function sendRideOffer(partner, booking, offer) {
  * Curto de propósito. É lido num aeroporto, com bagagem numa mão e
  * o telemóvel na outra — só o que faz falta para o encontrar.
  */
+/**
+ * A viagem mudou depois de ele a aceitar.
+ *
+ * O parceiro aceitou uma viagem num dia e num percurso. Se
+ * qualquer dos dois mudar, recebe outra coisa — e deve poder
+ * devolvê-la sem penalização.
+ *
+ * O email diz o que era e o que passou a ser. Sem isso ele teria de
+ * comparar duas coisas de cabeça, e é assim que se falha uma
+ * recolha.
+ */
+export async function sendRideChanged(partner, booking, mudanca) {
+  try {
+    const ref = reference(booking);
+
+    const linhas = [];
+
+    if (mudanca?.date_changed) {
+      linhas.push({ label: 'Date was', value: longDate(mudanca.old_date) });
+      linhas.push({ label: 'Date now', value: longDate(booking.booking_date) });
+    }
+
+    if (mudanca?.route_changed) {
+      if (mudanca.old_pickup !== booking.pickup) {
+        linhas.push({ label: 'Pick-up was', value: mudanca.old_pickup });
+        linhas.push({ label: 'Pick-up now', value: booking.pickup });
+      }
+
+      if (mudanca.old_dropoff !== booking.dropoff) {
+        linhas.push({ label: 'Drop-off was', value: mudanca.old_dropoff });
+        linhas.push({ label: 'Drop-off now', value: booking.dropoff });
+      }
+    }
+
+    const html = wrap({
+      preheader: 'A ride you accepted has changed.',
+      heading: 'A ride you accepted has changed',
+
+      /**
+       * O prazo, logo no início.
+       *
+       * Sem ele, o email pede uma decisão sem dizer quando — e uma
+       * decisão sem prazo adia-se. A viagem ficava parada até
+       * alguém reparar, e "alguém reparar" costuma ser o cliente a
+       * escrever no dia.
+       */
+      intro: 'The passenger changed their booking. Here is what moved.\n\n' +
+        'You have 2 hours to confirm you can still do it. After that it ' +
+        'goes back to the queue and somebody else takes it.',
+
+      blocks: [
+        { type: 'facts', items: linhas },
+
+        { type: 'facts', items: [
+          { label: 'Pick-up time', value: shortTime(booking.booking_time) },
+          { label: 'Passengers', value: booking.passengers },
+          { label: 'You receive', value: money(booking.driver_payout, booking.currency) }
+        ]},
+
+        { type: 'note', text:
+          'Handing this back does not count against you. You accepted one ' +
+          'thing and this is another — that is on us, not you. ' +
+          'Doing nothing also loses you the ride, so it is worth a look now.' }
+      ],
+
+      cta: {
+        label: 'Confirm or hand it back',
+        url: `${SITE}/drivers#ride-${booking.id}`
+      },
+
+      footNote: `Reference ${ref}`
+    });
+
+    return await sendOnce({
+      // A hora entra na chave: uma segunda alteração deve avisar
+      // outra vez.
+      key: `ride_changed:${ref}:${Date.now()}`,
+      template: 'ride_changed',
+      to: partner.email,
+      subject: `Changed — confirm within 2 hours — ${longDate(booking.booking_date)}`,
+      html
+    });
+  } catch (error) {
+    console.error('sendRideChanged failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendDriverArrived(booking, driver) {
   try {
     const ref = reference(booking);
