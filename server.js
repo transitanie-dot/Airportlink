@@ -2412,6 +2412,26 @@ app.get('/api/stripe-webhook/health', (req, res) => {
  */
 async function atribuir(booking) {
   /**
+   * A agenda primeiro, e sempre.
+   *
+   * Estava no fim, depois de a cascata encontrar um parceiro. Uma
+   * reserva sem parceiro na zona não chegava lá — e é justamente
+   * essa que tem de estar na agenda, a turquesa, para alguém
+   * reparar nela.
+   *
+   * Também não chegava lá quando a cascata falhava a meio, o que
+   * torna o problema invisível: o Telegram avisa, o calendário
+   * fica vazio, e ninguém liga as duas coisas.
+   *
+   * Sem esperar: a agenda não deve atrasar a oferta ao parceiro.
+   * Mas o erro é registado — o catch vazio que estava aqui
+   * escondia qualquer falha de configuração do Google.
+   */
+  calendarUpsert(booking).catch((e) =>
+    console.error('[calendar] upsert failed for',
+      booking.booking_reference, '—', e.message));
+
+  /**
    * Repartir primeiro.
    *
    * Uma reserva de onze pessoas são dois carros, e podem ser de
@@ -2483,12 +2503,14 @@ async function atribuir(booking) {
   }
 
   /**
-   * O evento na agenda, turquesa.
+   * E a agenda outra vez, agora que há oferta.
    *
-   * Ainda sem motorista: a oferta foi feita mas ninguém aceitou. A
-   * cor muda para azul quando aceitarem.
+   * O evento já existe — foi criado no início desta função. Este
+   * upsert atualiza o título, que passa a dizer que há uma oferta
+   * a decorrer.
    */
-  calendarUpsert(booking).catch(() => {});
+  calendarUpsert(booking).catch((e) =>
+    console.error('[calendar] update failed:', e.message));
 }
 
 app.post('/api/stripe-webhook', async (req, res) => {
