@@ -804,6 +804,16 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
 const ALLOWED_ORIGINS = [
   SITE_ORIGIN,
   'https://airportlink.app',
+
+  /**
+   * Com www também.
+   *
+   * O _redirects manda tudo para o www — é lá que o site vive de
+   * facto. Sem esta linha, o /maps chamava a API e o CORS
+   * recusava, e o browser dizia só "Failed to fetch".
+   */
+  'https://www.airportlink.app',
+
   'https://www.theepictours.com',
   /\.filesusr\.com$/,
   /\.wixsite\.com$/,
@@ -4637,6 +4647,34 @@ app.post('/api/internal/alarm', async (req, res) => {
 
 
 /**
+ * A configuração do mapa, servida pelo servidor.
+ *
+ * A chave anónima estava escrita na página. Isso obriga a
+ * republicar o site sempre que ela muda — e quando o Supabase
+ * mudou o formato das chaves, a página ficou com uma antiga e
+ * respondia "Invalid API key" sem dizer porquê.
+ *
+ * Vindo daqui, muda-se numa variável de ambiente.
+ */
+app.get('/api/maps/config.js', (req, res) => {
+  const cfg = {
+    supabaseUrl: process.env.SUPABASE_URL || '',
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
+    apiUrl: process.env.RENDER_EXTERNAL_URL || 'https://airportlink.onrender.com'
+  };
+
+  res.type('application/javascript');
+
+  // Sem cache: uma chave errada em cache é uma hora a perguntar
+  // porque é que não funciona.
+  res.set('Cache-Control', 'no-store');
+
+  res.send('window.MAP_CFG = ' + JSON.stringify(cfg) + ';');
+});
+
+
+/**
+ * Os dados do mapa./**
  * Os dados do mapa.
  *
  * Três camadas — cobertura, reservas e parceiros — numa chamada.
