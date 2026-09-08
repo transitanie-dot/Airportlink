@@ -364,8 +364,22 @@ async function sendOnce({ key, template, to, subject, html, bookingId, replyTo }
   }
 }
 
+/**
+ * A referência que se diz ao telefone.
+ *
+ * A coluna booking_reference está vazia em todas as reservas — 32
+ * de 32. O que se vê no painel vem do booking_id, que tem o
+ * "AL2633934" e o "-R" nas voltas.
+ *
+ * Esta função escolhe a que existir. Enquanto a coluna morta não
+ * for removida, comparar por ela falha em silêncio.
+ */
 function reference(booking) {
-  return booking.booking_reference || booking.booking_id || String(booking.id || '').slice(0, 8);
+  if (!booking) return '';
+
+  return booking.booking_id
+    || booking.booking_reference
+    || String(booking.id || '').slice(0, 8);
 }
 
 // ============================================================
@@ -1651,7 +1665,7 @@ export async function sendAgentStatement(agent, month, bookings, totals) {
       .toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
     const rows = bookings.slice(0, 60).map((b) => [
-      esc(b.booking_reference || b.booking_id || '') +
+      esc(reference(b)) +
         (b.agent_reference
           ? `<br><span style="color:#606A7B;font-size:11px">${esc(b.agent_reference)}</span>`
           : ''),
