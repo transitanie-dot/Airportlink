@@ -315,7 +315,7 @@ function corpo(booking, partner) {
       : 'NO DRIVER ASSIGNED',
     '',
     booking.notes ? `Notes: ${booking.notes}` : '',
-    `Ref: ${booking.booking_reference || booking.id}`
+    `Ref: ${refDe(booking)}`
   ].filter(Boolean);
 
   return {
@@ -355,6 +355,22 @@ function corpo(booking, partner) {
       ]
     }
   };
+}
+
+
+/**
+ * A referência que se diz ao telefone.
+ *
+ * A coluna booking_reference está vazia em todas as reservas — 32
+ * de 32. O que se vê no painel vem do booking_id, que tem o
+ * "AL2633934" e o "-R" nas voltas.
+ *
+ * Esta função escolhe a que existir. Enquanto a coluna morta não
+ * for removida, comparar por ela falha em silêncio.
+ */
+function refDe(b) {
+  if (!b) return '';
+  return refDe(b) || String(b.id || '').slice(0, 8);
 }
 
 
@@ -407,7 +423,7 @@ export async function calendarUpsert(booking, partner) {
     }
 
     console.log('[calendar]', existente ? 'updated' : 'created',
-      booking.booking_reference || booking.id,
+      refDe(booking),
       evento.colorId === COR.com_motorista ? '(blue)' : '(turquoise)');
 
     return { ok: true, id: data.id, updated: Boolean(existente) };
