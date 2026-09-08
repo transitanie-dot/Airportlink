@@ -4734,12 +4734,25 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
 
       try {
         const r = await calendarUpsert(b);
-        if (r?.ok) feitas += 1;
+
+        if (r?.ok) {
+          feitas += 1;
+        } else {
+          /**
+           * Não lançou, mas também não fez.
+           *
+           * O calendarUpsert nunca lança — devolve { ok: false } com
+           * a razão. Contar isso como sucesso silencioso foi o que
+           * fez o sweep dizer "synced: 0" sem explicar porquê.
+           */
+          falhadas += 1;
+
+          if (erros.length < 3) {
+            erros.push(`${refDe(b)}: ${r?.reason || 'unknown'}`);
+          }
+        }
       } catch (e) {
         falhadas += 1;
-
-        // O primeiro erro chega: se o Google está em baixo, os
-        // mil vão dizer o mesmo.
         if (erros.length < 3) erros.push(`${refDe(b)}: ${e.message}`);
       }
     }
@@ -4760,6 +4773,10 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
        * dia em vez de o tornar mais lento.
        */
       remaining: porFazer,
+      // As razões, sempre. Um "synced: 0" sem explicação é uma hora
+      // a adivinhar.
+      reasons: erros,
+
       // O middleware das tarefas lê isto e avisa no Telegram.
       failures: erros.length
         ? erros.map((e) => ({ part: 'calendar', error: e }))
