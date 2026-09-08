@@ -112,6 +112,22 @@ async function send(chatId, text, options = {}) {
  * relatório.
  */
 /**
+ * A referência que se diz ao telefone.
+ *
+ * A coluna booking_reference está vazia em todas as reservas — 32
+ * de 32. O que se vê no painel vem do booking_id, que tem o
+ * "AL2633934" e o "-R" nas voltas.
+ *
+ * Esta função escolhe a que existir. Enquanto a coluna morta não
+ * for removida, comparar por ela falha em silêncio.
+ */
+function refDe(b) {
+  if (!b) return '';
+  return refDe(b) || String(b.id || '').slice(0, 8);
+}
+
+
+/**
  * Uma tarefa automática falhou.
  *
  * Vai para o canal de alarmes, com som. É a diferença entre saber
@@ -315,7 +331,7 @@ export async function telegramNewBooking(booking, assignment) {
 
   // A referência, se já foi gerada. Nos primeiros segundos pode
   // ainda não estar — o id serve na mesma para a procurar.
-  const ref = booking.booking_reference || booking.booking_id || booking.id;
+  const ref = booking.booking_id || refDe(booking);
 
   if (ref) linhas.push('', `\`${esc(ref)}\``);
 
