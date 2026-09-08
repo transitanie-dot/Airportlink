@@ -4636,7 +4636,38 @@ app.post('/api/internal/alarm', async (req, res) => {
 });
 
 
-/** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
+/**
+ * Os dados do mapa.
+ *
+ * Três camadas — cobertura, reservas e parceiros — numa chamada.
+ * Três chamadas seriam três esperas no plano gratuito do Render.
+ *
+ * Só para administradores: isto mostra a nossa cobertura inteira,
+ * e um concorrente que a visse saberia exatamente onde atacar.
+ */
+app.get('/api/maps/data', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { data, error } = await supabase.rpc('map_data');
+
+    if (error) throw error;
+
+    return res.json(data || {});
+  } catch (error) {
+    console.error('maps data:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
 app.get('/api/tasks/flights-test', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
