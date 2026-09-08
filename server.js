@@ -4674,6 +4674,69 @@ app.get('/api/maps/config.js', (req, res) => {
 
 
 /**
+ * A árvore de cobertura: continentes e países.
+ *
+ * Uma lista de 801 aeroportos não se navega. Por continente e
+ * país, com os números de cada um, navega-se — e carrega-se só o
+ * que se abre.
+ */
+app.get('/api/maps/tree', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { data, error } = await supabase.rpc('coverage_tree');
+    if (error) throw error;
+
+    return res.json(data || {});
+  } catch (error) {
+    console.error('coverage tree:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * Os aeroportos de um país, com as empresas de cada um.
+ *
+ * Pedido quando alguém abre um país no menu. Traz tudo o que é
+ * preciso para desenhar essa secção — incluindo as empresas em
+ * análise, que são o que distingue um aeroporto âmbar de um
+ * vermelho.
+ */
+app.get('/api/maps/country', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    if (!req.query.name) {
+      return res.status(400).json({ error: 'Send a country name.' });
+    }
+
+    const { data, error } = await supabase.rpc('airports_in', {
+      p_country: req.query.name
+    });
+
+    if (error) throw error;
+
+    return res.json({ airports: data || [] });
+  } catch (error) {
+    console.error('country airports:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * Os dados do mapa./**
  * Os dados do mapa./**
  * Os dados do mapa.
  *
