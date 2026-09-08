@@ -4674,6 +4674,33 @@ app.get('/api/maps/config.js', (req, res) => {
 
 
 /**
+ * As três listas do topo.
+ *
+ * Quem espera aprovação, onde recrutar a seguir, e quem já temos.
+ * A árvore serve para procurar; estas servem para decidir — e é
+ * isso que se faz ao abrir a página.
+ */
+app.get('/api/maps/summary', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { data, error } = await supabase.rpc('coverage_summary');
+    if (error) throw error;
+
+    return res.json(data || {});
+  } catch (error) {
+    console.error('coverage summary:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
  * A árvore de cobertura: continentes e países.
  *
  * Uma lista de 801 aeroportos não se navega. Por continente e
