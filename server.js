@@ -4674,6 +4674,206 @@ app.get('/api/maps/config.js', (req, res) => {
 
 
 /**
+ * O funil de um aeroporto.
+ *
+ * Quem já contactámos, o que se disse, e em que ponto está. Sem
+ * isto, dois vendedores ligam à mesma empresa na mesma semana — e
+ * ela pensa que somos desorganizados.
+ */
+app.get('/api/maps/pipeline', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    if (!req.query.iata) {
+      return res.status(400).json({ error: 'Send an airport code.' });
+    }
+
+    const { data, error } = await supabase.rpc('airport_pipeline', {
+      p_iata: String(req.query.iata).toUpperCase()
+    });
+
+    if (error) throw error;
+
+    return res.json(data || {});
+  } catch (error) {
+    console.error('pipeline:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Uma empresa nova para contactar. */
+app.post('/api/maps/lead', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const b = req.body || {};
+
+    if (!b.company_name || !Array.isArray(b.airports) || !b.airports.length) {
+      return res.status(400).json({
+        error: 'Send a company name and at least one airport.'
+      });
+    }
+
+    const { data, error } = await supabase.from('leads').insert({
+      company_name: String(b.company_name).trim(),
+      airports: b.airports.map((a) => String(a).toUpperCase()),
+      country: b.country || null,
+      contact_name: b.contact_name || null,
+      email: b.email || null,
+      phone: b.phone || null,
+      website: b.website || null,
+      fleet_note: b.fleet_note || null,
+      sedans: Number(b.sedans) || null,
+      vans: Number(b.vans) || null,
+      source: b.source || null,
+
+      // Quem a encontrou fica dono, até alguém a passar.
+      owner_id: admin.id,
+      created_by: admin.id
+    }).select().maybeSingle();
+
+    if (error) throw error;
+
+    return res.json({ success: true, lead: data });
+  } catch (error) {
+    console.error('new lead:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * Registar um contacto.
+ *
+ * Uma chamada, um email, uma reunião. É isto que impede o trabalho
+ * de se repetir.
+ */
+app.post('/api/maps/touch', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { lead_id, kind, note, stage, next_action } = req.body || {};
+
+    if (!lead_id || !note) {
+      return res.status(400).json({ error: 'Send lead_id and a note.' });
+    }
+
+    /**
+     * Com o service_role, não com a sessão do utilizador.
+     *
+     * O server.js não tem o asUser do serviço de drivers. E o
+     * log_touch usa auth.uid() para saber quem fez o contacto —
+     * que com o service_role é nulo.
+     *
+     * Por isso o id vai explícito, e a função aceita-o.
+     */
+    const { data, error } = await supabase.rpc('log_touch', {
+      p_lead_id: lead_id,
+      p_kind: kind || 'call',
+      p_note: note,
+      p_new_stage: stage || null,
+      p_next_action: next_action || null,
+      p_agent_id: admin.id
+    });
+
+    if (error) throw error;
+
+    if (data && data.ok === false) {
+      const msg = {
+        note_required: 'Write what was said. A contact without a note ' +
+          'is no use to anybody — not even to you, two weeks from now.',
+        not_found: 'That company is no longer in the list.',
+        not_allowed: 'Administrator access required.'
+      };
+
+      return res.status(400).json({ error: msg[data.reason] || 'Could not save.' });
+    }
+
+    return res.json({ success: true, ...(data || {}) });
+  } catch (error) {
+    console.error('touch:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** O que tenho para fazer hoje. */
+app.get('/api/maps/my-pipeline', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { data, error } = await supabase.rpc('my_pipeline', {
+      p_user_id: admin.id
+    });
+
+    if (error) throw error;
+
+    return res.json(data || {});
+  } catch (error) {
+    console.error('my pipeline:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/** Quem trata de um aeroporto. */
+app.post('/api/maps/owner', async (req, res) => {
+  try {
+    const { user: admin, error: adminError } = await requireAdmin(req);
+    if (!admin) {
+      return res.status(403).json({
+        error: adminError || 'Administrator access required.'
+      });
+    }
+
+    const { iata, owner_id } = req.body || {};
+    if (!iata) return res.status(400).json({ error: 'Send an airport code.' });
+
+    if (owner_id === null) {
+      await supabase.from('airport_owners').delete()
+        .eq('iata', String(iata).toUpperCase());
+
+      return res.json({ success: true, cleared: true });
+    }
+
+    const { error } = await supabase.from('airport_owners').upsert({
+      iata: String(iata).toUpperCase(),
+      owner_id: owner_id || admin.id,
+      assigned_at: new Date().toISOString()
+    }, { onConflict: 'iata' });
+
+    if (error) throw error;
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('owner:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
  * As três listas do topo.
  *
  * Quem espera aprovação, onde recrutar a seguir, e quem já temos.
