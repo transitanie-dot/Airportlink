@@ -272,8 +272,24 @@ function corpo(booking, partner) {
     ? 'CANCELLED'
     : `${pago ? '🔒 ' : ''}${CARRO[chave] || chave}`;
 
+  /**
+   * A perna, quando há duas.
+   *
+   * Uma ida e volta são dois eventos com a mesma referência e
+   * moradas invertidas. Sem uma marca, quem olha para a agenda tem
+   * de ler as moradas inteiras para saber qual é qual — e às sete
+   * da manhã isso engana-se.
+   *
+   * Nas reservas de sentido único não aparece nada: uma marca que
+   * está sempre lá não distingue nada.
+   */
+  const perna = booking.leg === 2 ? 'RETURN'
+    : (booking.paired_booking_id || booking.trip_group_id) ? 'OUT'
+    : null;
+
   const titulo = [
     marca,
+    perna,
     cancelada ? (CARRO[chave] || chave) : null,
     `${de} → ${para}`,
     `${pax}p`,
