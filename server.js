@@ -2513,7 +2513,8 @@ app.post('/api/cancel-booking', async (req, res) => {
     let refundId = null;
 
     // O pagamento pode estar na outra perna: uma ida e volta é um
-    // pagamento só, guardado na ida.
+    // pagamento só, guardado na ida, e as duas partilham o
+    // trip_group_id.
     booking.stripe_payment_intent_id = await intentDe(booking);
 
     if (booking.stripe_payment_intent_id) {
@@ -2636,6 +2637,8 @@ app.post('/api/admin/refund', async (req, res) => {
      * Uma ida e volta é um pagamento só, guardado na ida. Sem
      * isto, reembolsar a volta a partir do painel dizia "sem
      * pagamento" a uma reserva que foi paga.
+     *
+     * As duas encontram-se pelo trip_group_id.
      */
     booking.stripe_payment_intent_id = await intentDe(booking);
 
@@ -3600,17 +3603,6 @@ app.post('/api/stripe-webhook', async (req, res) => {
           : null,
         leg: 2,
 
-        /**
-         * A volta aponta para a ida.
-         *
-         * As duas pernas partilham o pagamento, que fica só na ida
-         * porque a coluna é única. Sem esta ligação, reembolsar a
-         * volta não encontrava o pagamento — e não havia forma de
-         * saber a que ida ela pertencia sem comparar referências
-         * por texto.
-         */
-        return_of: savedBooking?.id || null,
-
         pickup: metadata.return_pickup,
         dropoff: metadata.return_dropoff,
         booking_date: metadata.return_date,
@@ -3637,8 +3629,8 @@ app.post('/api/stripe-webhook', async (req, res) => {
          * dinheiro.
          *
          * As duas pernas foram pagas num só pagamento. A ida
-         * guarda-o; a volta aponta para ela pelo return_of, e quem
-         * precisar do pagamento vai lá buscar.
+         * guarda-o; a volta encontra-o pelo trip_group_id, que
+         * ambas partilham.
          *
          * Sem isto, a volta nunca era criada: "duplicate key value
          * violates unique constraint".
@@ -4084,19 +4076,30 @@ async function tarefa(nome, fn) {
  * valor. E é bem que não aceite: dois registos seriam dois
  * reembolsos possíveis do mesmo dinheiro.
  *
- * A volta aponta para a ida pelo return_of. Isto vai lá buscar.
+ * As duas pernas partilham o trip_group_id. Isto vai lá buscar.
  */
 async function intentDe(booking) {
   if (booking.stripe_payment_intent_id) {
     return booking.stripe_payment_intent_id;
   }
 
-  if (!booking.return_of) return null;
+  /**
+   * O trip_group_id liga as duas pernas.
+   *
+   * Já existia — é gerado no checkout e viaja nos metadados, para
+   * que o webhook a chegar duas vezes não crie dois grupos.
+   *
+   * Inventei um "return_of" antes de reparar nele. Este é melhor:
+   * uma ida e volta é um grupo, não uma perna que aponta para
+   * outra.
+   */
+  if (!booking.trip_group_id) return null;
 
   const { data: ida } = await supabase
     .from('bookings')
     .select('stripe_payment_intent_id')
-    .eq('id', booking.return_of)
+    .eq('trip_group_id', booking.trip_group_id)
+    .eq('leg', 1)
     .maybeSingle();
 
   return ida?.stripe_payment_intent_id || null;
