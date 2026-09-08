@@ -2512,6 +2512,10 @@ app.post('/api/cancel-booking', async (req, res) => {
 
     let refundId = null;
 
+    // O pagamento pode estar na outra perna: uma ida e volta é um
+    // pagamento só, guardado na ida.
+    booking.stripe_payment_intent_id = await intentDe(booking);
+
     if (booking.stripe_payment_intent_id) {
       try {
         const refund = await stripe.refunds.create({
@@ -2625,6 +2629,15 @@ app.post('/api/admin/refund', async (req, res) => {
     if (bookingError || !booking) {
       return res.status(404).json({ error: 'Booking not found' });
     }
+
+    /**
+     * O pagamento pode estar na outra perna.
+     *
+     * Uma ida e volta é um pagamento só, guardado na ida. Sem
+     * isto, reembolsar a volta a partir do painel dizia "sem
+     * pagamento" a uma reserva que foi paga.
+     */
+    booking.stripe_payment_intent_id = await intentDe(booking);
 
     if (!booking.stripe_payment_intent_id) {
       return res.status(400).json({
@@ -3603,6 +3616,23 @@ app.post('/api/stripe-webhook', async (req, res) => {
         // Uma cobrança só, registada na ida. Duplicar aqui daria dois
         // débitos para uma compra.
         stripe_checkout_session_id: `${session.id}-R`,
+
+        /**
+         * O payment_intent fica só na ida.
+         *
+         * A coluna é única — e é bem que seja: dois registos com o
+         * mesmo intent seriam dois reembolsos possíveis do mesmo
+         * dinheiro.
+         *
+         * As duas pernas foram pagas num só pagamento. A ida
+         * guarda-o; a volta aponta para ela pelo return_of, e quem
+         * precisar do pagamento vai lá buscar.
+         *
+         * Sem isto, a volta nunca era criada: "duplicate key value
+         * violates unique constraint".
+         */
+        stripe_payment_intent_id: null,
+
         settled_eur: null,
         stripe_fee_eur: null,
         balance_transaction_id: null,
@@ -4035,6 +4065,34 @@ async function tarefa(nome, fn) {
 
 
 /**
+ * O pagamento de uma reserva, venha de onde vier.
+ *
+ * Uma ida e volta é um pagamento só, guardado na ida — a coluna do
+ * payment_intent é única e não aceita dois registos com o mesmo
+ * valor. E é bem que não aceite: dois registos seriam dois
+ * reembolsos possíveis do mesmo dinheiro.
+ *
+ * A volta aponta para a ida pelo return_of. Isto vai lá buscar.
+ */
+async function intentDe(booking) {
+  if (booking.stripe_payment_intent_id) {
+    return booking.stripe_payment_intent_id;
+  }
+
+  if (!booking.return_of) return null;
+
+  const { data: ida } = await supabase
+    .from('bookings')
+    .select('stripe_payment_intent_id')
+    .eq('id', booking.return_of)
+    .maybeSingle();
+
+  return ida?.stripe_payment_intent_id || null;
+}
+
+
+/**
+ * Cobrar a espera, no cartão que já está guardado./**
  * Cobrar a espera, no cartão que já está guardado./**
  * Cobrar a espera, no cartão que já está guardado.
  *
@@ -4330,10 +4388,14 @@ async function acertarDiferenca(booking, valor, tipo) {
    * cobrado, a diferença sai da cobrança futura sozinha — o preço
    * já foi atualizado.
    */
-  if (!booking.stripe_payment_intent_id) return;
+  const intent = await intentDe(booking);
+
+  // Sem pagamento não há o que devolver. Num pay later ainda não
+  // cobrado, a diferença sai da cobrança futura sozinha.
+  if (!intent) return;
 
   await stripe.refunds.create({
-    payment_intent: booking.stripe_payment_intent_id,
+    payment_intent: intent,
     amount,
     metadata: { booking_id: String(booking.id), kind: 'change_difference' }
   });
