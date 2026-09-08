@@ -3599,6 +3599,18 @@ app.post('/api/stripe-webhook', async (req, res) => {
           ? `${bookingRow.booking_reference}-R`
           : null,
         leg: 2,
+
+        /**
+         * A volta aponta para a ida.
+         *
+         * As duas pernas partilham o pagamento, que fica só na ida
+         * porque a coluna é única. Sem esta ligação, reembolsar a
+         * volta não encontrava o pagamento — e não havia forma de
+         * saber a que ida ela pertencia sem comparar referências
+         * por texto.
+         */
+        return_of: savedBooking?.id || null,
+
         pickup: metadata.return_pickup,
         dropoff: metadata.return_dropoff,
         booking_date: metadata.return_date,
