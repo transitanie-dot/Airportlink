@@ -3682,6 +3682,22 @@ app.post('/api/stripe-webhook', async (req, res) => {
         ]);
 
         console.log('Return leg created:', savedReturn.booking_id);
+
+        /**
+         * E a volta segue o mesmo caminho da ida.
+         *
+         * Era criada, entrava no email de confirmação, e mais nada:
+         * sem evento na agenda e sem oferta a nenhum parceiro.
+         *
+         * O cliente pagou duas viagens e só uma estava a ser
+         * organizada. A outra só aparecia no dia, quando ele
+         * ligasse a perguntar pelo carro.
+         *
+         * Sem esperar: a confirmação ao cliente não deve ficar à
+         * espera da cascata.
+         */
+        atribuir(savedReturn).catch((e) =>
+          console.error('[assign] return leg failed:', e.message));
       }
     }
     } catch (error) {
