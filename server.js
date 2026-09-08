@@ -4096,7 +4096,7 @@ async function tarefa(nome, fn) {
  */
 function refDe(b) {
   if (!b) return '';
-  return refDe(b) || String(b.id || '').slice(0, 8);
+  return b.booking_id || b.booking_reference || String(b.id || '').slice(0, 8);
 }
 
 
