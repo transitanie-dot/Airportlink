@@ -58,6 +58,7 @@ import {
   sendTripReminder,
   sendDriverArrived,
   sendRideChanged,
+  sendTicketReply,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -1103,6 +1104,8 @@ const INTERNAL_TEMPLATES = {
     sendRideOfferReminder(p.partner, p.booking, p.offer),
   // A viagem mudou depois de ele a aceitar.
   ride_changed: (p) => sendRideChanged(p.partner, p.booking, p.mudanca),
+  // Um agente respondeu a um ticket.
+  ticket_reply: (p) => sendTicketReply(p.chat, p.mensagem, p.agente),
   // O link de confirmação só pode ser gerado aqui: é este serviço
   // que tem o cliente com service_role.
   verify_email: (p) => sendVerification(p.email, p.name, p.kind || 'partner'),
