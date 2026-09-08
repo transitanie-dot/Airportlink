@@ -167,6 +167,23 @@ function wrap({ preheader, heading, intro, blocks = [], cta, footNote }) {
         </td></tr></table>`;
     }
 
+    /**
+     * Uma citação: o que o agente escreveu.
+     *
+     * Recuada e em cinzento, para se ler como uma mensagem e não
+     * como texto nosso. O cliente reconhece a diferença sem ter de
+     * pensar nela.
+     */
+    if (b.type === 'quote') {
+      return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="margin:16px 0"><tr>
+        <td style="padding:14px 18px;background:#F7F7F4;
+                   border-left:3px solid #0D9488;border-radius:0 10px 10px 0;
+                   font-size:15px;line-height:1.6;color:#1A1A17;
+                   white-space:pre-wrap">${esc(b.text || '')}</td>
+      </tr></table>`;
+    }
+
     if (b.type === 'note') {
       const colours = {
         ok: ['#ECFDF5', '#A7F3D0', '#065F46'],
@@ -1023,6 +1040,71 @@ export async function sendRideChanged(partner, booking, mudanca) {
     });
   } catch (error) {
     console.error('sendRideChanged failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
+/**
+ * Um agente respondeu a um ticket.
+ *
+ * Só nos tickets: no modo ao vivo o cliente está no ecrã, e um
+ * email a dizer o que ele acabou de ler é ruído.
+ *
+ * Num ticket é o contrário — ele fechou o separador e foi-se
+ * embora. Sem o email, a resposta fica num sítio que ninguém vai
+ * ver.
+ */
+export async function sendTicketReply(chat, mensagem, agente) {
+  try {
+    if (!chat?.email) return { sent: false, reason: 'no-email' };
+
+    const html = wrap({
+      preheader: 'We replied to your message.',
+      heading: 'We replied',
+
+      intro: `${agente?.display_name || 'Our team'} answered your message.`,
+
+      blocks: [
+        {
+          type: 'quote',
+          text: String(mensagem || '').slice(0, 1200)
+        },
+
+        {
+          type: 'note',
+          text: 'Reply on the site and we will pick it up from there. ' +
+                'You can send one message at a time — we answer each one ' +
+                'before you write the next.'
+        }
+      ],
+
+      cta: {
+        label: 'Open the conversation',
+        url: `${SITE}/support?chat=${chat.id}`
+      },
+
+      footNote: chat.ticket ? `Reference ${chat.ticket}` : null
+    });
+
+    return await sendOnce({
+      /**
+       * A hora entra na chave.
+       *
+       * Cada resposta é um email — não é uma confirmação que se
+       * manda uma vez. Sem isto, a segunda resposta num ticket
+       * nunca saía.
+       */
+      key: `ticket_reply:${chat.id}:${Date.now()}`,
+      template: 'ticket_reply',
+      to: chat.email,
+      subject: chat.ticket
+        ? `Re: your message (${chat.ticket})`
+        : 'We replied to your message',
+      html
+    });
+  } catch (error) {
+    console.error('sendTicketReply failed:', error);
     return { sent: false, reason: error.message };
   }
 }
