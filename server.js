@@ -3194,7 +3194,7 @@ async function atribuir(booking) {
    */
   calendarUpsert(booking).catch((e) =>
     console.error('[calendar] upsert failed for',
-      booking.booking_reference, '—', e.message));
+      refDe(booking), '—', e.message));
 
   /**
    * Repartir primeiro.
@@ -3210,7 +3210,7 @@ async function atribuir(booking) {
     });
 
     if (split?.segments?.length > 1) {
-      console.log('[assign]', booking.booking_reference,
+      console.log('[assign]', refDe(booking),
         'split into', split.segments.length, 'vehicles');
     }
   } catch (e) {
@@ -3237,7 +3237,7 @@ async function atribuir(booking) {
       telegramNewBooking(booking, offer).catch(() => {});
 
       await notifyOps('Booking with no partner in the zone', [
-        `Booking: ${booking.booking_reference || booking.id}`,
+        `Booking: ${refDe(booking)}`,
         `Trip: ${booking.pickup} to ${booking.dropoff}`,
         `Date: ${booking.booking_date}`,
         `Passengers: ${booking.passengers}`,
@@ -3249,7 +3249,7 @@ async function atribuir(booking) {
     return;
   }
 
-  console.log('[assign]', booking.booking_reference,
+  console.log('[assign]', refDe(booking),
     '->', offer.partner, '(' + offer.reason + ')');
 
   // A venda no telemóvel, silenciosa. Ver as vendas a entrar diz
@@ -3661,7 +3661,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
         console.error('Return leg failed:', returnError);
 
         await notifyOps('Return leg was not created', [
-          `Outbound: ${bookingRow.booking_reference || bookingRow.booking_id}`,
+          `Outbound: ${refDe(bookingRow)}`,
           `Customer: ${bookingRow.full_name} (${bookingRow.email})`,
           `Return: ${metadata.return_pickup} to ${metadata.return_dropoff}`,
           `On ${metadata.return_date} at ${metadata.return_time || '(no time)'}`,
@@ -3845,7 +3845,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
       await notifyOps('Payment failed', [
         `Intent: ${intent.id}`,
         booking
-          ? `Booking: ${booking.booking_reference || booking.id}`
+          ? `Booking: ${refDe(booking)}`
           : 'No booking found for this intent.',
         `Amount: ${(intent.amount / 100).toFixed(2)} ${String(intent.currency).toUpperCase()}`,
         `Reason: ${motivo}`
@@ -3899,7 +3899,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
       await notifyOps(parcial ? 'Partial refund' : 'Refund', [
         booking
-          ? `Booking: ${booking.booking_reference || booking.id}`
+          ? `Booking: ${refDe(booking)}`
           : 'No booking found.',
         `Refunded: ${devolvido.toFixed(2)} of ${total.toFixed(2)} ` +
           String(charge.currency).toUpperCase(),
@@ -3980,7 +3980,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
       await notifyOps(titulo, [
         booking
-          ? `Booking: ${booking.booking_reference || booking.id}`
+          ? `Booking: ${refDe(booking)}`
           : 'No booking found for this charge.',
         booking ? `Customer: ${booking.full_name} (${booking.email})` : '',
         booking ? `Trip: ${booking.pickup} to ${booking.dropoff} on ${booking.booking_date}` : '',
@@ -4085,6 +4085,22 @@ async function tarefa(nome, fn) {
 
 
 /**
+ * A referência que se diz ao telefone.
+ *
+ * A coluna booking_reference está vazia em todas as reservas — 32
+ * de 32. O que se vê no painel vem do booking_id, que tem o
+ * "AL2633934" e o "-R" nas voltas.
+ *
+ * Esta função escolhe a que existir. Enquanto a coluna morta não
+ * for removida, comparar por ela falha em silêncio.
+ */
+function refDe(b) {
+  if (!b) return '';
+  return refDe(b) || String(b.id || '').slice(0, 8);
+}
+
+
+/**
  * O pagamento de uma reserva, venha de onde vier.
  *
  * Uma ida e volta é um pagamento só, guardado na ida — a coluna do
@@ -4170,7 +4186,7 @@ app.post('/api/internal/charge-extra', async (req, res) => {
       }).eq('id', booking_id);
 
       await notifyOps('Waiting charge could not be taken', [
-        `Booking: ${booking.booking_reference || booking.id}`,
+        `Booking: ${refDe(booking)}`,
         `Customer: ${booking.full_name} (${booking.email})`,
         `Amount: ${Number(booking.extra_amount).toFixed(2)} ${booking.currency || 'EUR'}`,
         `Waiting: ${booking.extra_minutes} minutes past the free time`,
@@ -4192,7 +4208,7 @@ app.post('/api/internal/charge-extra', async (req, res) => {
       payment_method: booking.stripe_payment_method_id,
       off_session: true,
       confirm: true,
-      description: `Waiting time — ${booking.booking_reference || booking.id}`,
+      description: `Waiting time — ${refDe(booking)}`,
       metadata: {
         booking_id: String(booking.id),
         kind: 'waiting_time',
@@ -4206,7 +4222,7 @@ app.post('/api/internal/charge-extra', async (req, res) => {
       updated_at: new Date().toISOString()
     }).eq('id', booking_id);
 
-    console.log('[extra] charged', booking.booking_reference,
+    console.log('[extra] charged', refDe(booking),
       Number(booking.extra_amount).toFixed(2), currency);
 
     return res.json({ ok: true, intent: intent.id });
@@ -4388,7 +4404,7 @@ async function acertarDiferenca(booking, valor, tipo) {
   if (tipo === 'charge') {
     if (!booking.stripe_payment_method_id || !booking.stripe_customer_id) {
       await notifyOps('Booking change needs a payment', [
-        `Booking: ${booking.booking_reference || booking.id}`,
+        `Booking: ${refDe(booking)}`,
         `Customer: ${booking.full_name} (${booking.email})`,
         `Owed: ${valor.toFixed(2)} ${currency}`,
         '',
@@ -4404,7 +4420,7 @@ async function acertarDiferenca(booking, valor, tipo) {
       payment_method: booking.stripe_payment_method_id,
       off_session: true,
       confirm: true,
-      description: `Booking change — ${booking.booking_reference || booking.id}`,
+      description: `Booking change — ${refDe(booking)}`,
       metadata: { booking_id: String(booking.id), kind: 'change_difference' }
     });
 
@@ -4594,7 +4610,7 @@ app.post('/api/internal/flight-landing', async (req, res) => {
         .update({ flight_landed_at: voo.landed_at })
         .eq('id', booking.id);
 
-      console.log('[flights]', booking.booking_reference,
+      console.log('[flights]', refDe(booking),
         booking.flight_number, 'landed', voo.landed_at);
 
       return res.json({ ok: true, landed_at: voo.landed_at });
@@ -4661,8 +4677,18 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
   try {
     const hoje = new Date().toISOString().slice(0, 10);
 
+    /**
+     * Um ano à frente.
+     *
+     * Eram trinta dias, e isso deixava de fora as reservas feitas
+     * com muita antecedência — que são precisamente as que mais
+     * tempo têm para se perder de vista.
+     *
+     * Uma ida e volta marcada em setembro para outubro caía a 35
+     * dias e nunca chegava à agenda.
+     */
     const limite = new Date();
-    limite.setDate(limite.getDate() + 30);
+    limite.setFullYear(limite.getFullYear() + 1);
 
     const { data: reservas, error } = await supabase
       .from('bookings')
@@ -4671,7 +4697,15 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
       .lte('booking_date', limite.toISOString().slice(0, 10))
       .neq('status', 'cancelled')
       .order('booking_date')
-      .limit(200);
+      /**
+       * Mais fundo, agora que a janela é um ano.
+       *
+       * Duzentas reservas eram muitas para trinta dias e são
+       * poucas para trezentos e sessenta e cinco. As que ficassem
+       * de fora nunca chegariam à agenda, porque o sweep começa
+       * sempre pelas mais próximas.
+       */
+      .limit(1000);
 
     if (error) throw error;
 
@@ -4679,7 +4713,25 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
     let falhadas = 0;
     const erros = [];
 
+    /**
+     * Um limite de tempo.
+     *
+     * Com um ano de janela são até mil reservas, e mil chamadas ao
+     * Google levam três minutos — mais do que o Render espera
+     * antes de cortar.
+     *
+     * Cinquenta segundos e para. O que ficar por fazer fica para a
+     * próxima corrida, e a resposta diz quantas foram.
+     */
+    const pararAs = Date.now() + 50000;
+    let porFazer = 0;
+
     for (const b of reservas || []) {
+      if (Date.now() > pararAs) {
+        porFazer += 1;
+        continue;
+      }
+
       try {
         const r = await calendarUpsert(b);
         if (r?.ok) feitas += 1;
@@ -4687,8 +4739,8 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
         falhadas += 1;
 
         // O primeiro erro chega: se o Google está em baixo, os
-        // duzentos vão dizer o mesmo.
-        if (erros.length < 3) erros.push(`${b.booking_reference}: ${e.message}`);
+        // mil vão dizer o mesmo.
+        if (erros.length < 3) erros.push(`${refDe(b)}: ${e.message}`);
       }
     }
 
@@ -4699,6 +4751,15 @@ app.post('/api/tasks/calendar-sweep', async (req, res) => {
       checked: reservas?.length || 0,
       synced: feitas,
       failed: falhadas,
+
+      /**
+       * As que ficaram para a próxima.
+       *
+       * Não é erro: é o tempo a acabar. Se este número for sempre
+       * maior que zero, vale a pena correr o cron mais vezes por
+       * dia em vez de o tornar mais lento.
+       */
+      remaining: porFazer,
       // O middleware das tarefas lê isto e avisa no Telegram.
       failures: erros.length
         ? erros.map((e) => ({ part: 'calendar', error: e }))
@@ -5477,7 +5538,7 @@ app.post('/api/tasks/charge-due', async (req, res) => {
           // foi cancelada por não haver pagamento, sobretudo se já
           // tinha motorista atribuído.
           await notifyOps('Booking cancelled — payment failed', [
-            `Reference: ${booking.booking_reference || booking.booking_id}`,
+            `Reference: ${refDe(booking)}`,
             `Customer: ${booking.full_name || ''} (${booking.email})`,
             `Pick-up: ${booking.booking_date} ${String(booking.booking_time || '').slice(0, 5)}`,
             `Route: ${booking.pickup} to ${booking.dropoff}`,
