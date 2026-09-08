@@ -287,6 +287,15 @@ function corpo(booking, partner) {
     : (booking.paired_booking_id || booking.trip_group_id) ? 'OUT'
     : null;
 
+  /**
+   * A referência fica na descrição, não no título.
+   *
+   * O título é para se ler de relance na vista de mês — o carro, o
+   * percurso, se tem motorista. Um código de nove letras à frente
+   * empurra tudo isso para fora do espaço visível.
+   *
+   * Quem precisa da referência abre o evento.
+   */
   const titulo = [
     marca,
     perna,
@@ -299,6 +308,15 @@ function corpo(booking, partner) {
   ].filter(Boolean).join(' · ');
 
   const linhas = [
+    /**
+     * A referência primeiro.
+     *
+     * É o que o cliente diz ao telefone e o que se procura no
+     * painel. Estava só no título, onde o Google a corta quando o
+     * evento é curto — e não estava de todo na descrição.
+     */
+    refDe(booking) ? `Ref: ${refDe(booking)}` : '',
+    '',
     booking.full_name || booking.passenger_name || '',
     booking.passenger_phone || booking.phone_number || '',
     booking.email || '',
