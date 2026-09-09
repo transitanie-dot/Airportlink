@@ -297,7 +297,15 @@ export async function telegramNewBooking(booking, assignment) {
      * para daqui a três semanas aparecia com a data de hoje. A
      * data que interessa é quando o carro tem de estar lá.
      */
-    `📅 ${esc(booking.booking_date)} at ${esc(booking.booking_time || '—')}`,
+    /**
+     * E a lua, quando é de noite.
+     *
+     * Um transfer às três da manhã é mais difícil de atribuir: há
+     * menos motoristas disponíveis, e quem vir a mensagem sabe que
+     * pode ter de procurar mais.
+     */
+    `📅 ${esc(booking.booking_date)} at ${esc(booking.booking_time || '—')}` +
+      (booking.night_surcharge ? '  🌙 night' : ''),
     `👥 ${esc(booking.passengers)} passenger${booking.passengers === 1 ? '' : 's'}` +
       ` · ${esc(classe)}`,
     '',
