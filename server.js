@@ -59,6 +59,7 @@ import {
   sendDriverArrived,
   sendRideChanged,
   sendTicketReply,
+  sendDeletionConfirm,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -569,7 +570,7 @@ const NIGHT_FROM = 22 * 60 + 55;   // 22:55
 const NIGHT_TO = 6 * 60;           // 06:00
 const NIGHT_MULT = 1.2;
 
-function isNightPickup(timeStr) {
+export function isNightPickup(timeStr) {
   if (!timeStr) return false;
 
   const m = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
@@ -587,7 +588,7 @@ function isNightPickup(timeStr) {
 }
 
 
-function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
+export function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
   const o = opts || {};
   const vehicle = resolveVehicleClass(o.vehicleClass, passengers);
 
@@ -656,8 +657,23 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
   }
 
   // Sem país estudado, a fórmula antiga.
-  // Sem país estudado, a fórmula antiga — com a noite na mesma.
-  return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult * noite);
+  /**
+   * Sem país estudado.
+   *
+   * Eram 3,50 por quilómetro vezes 1,3 — três a quatro vezes mais
+   * do que as tarifas reais de Espanha e Portugal. Um transfer de
+   * 300 km saía a 2365 euros.
+   *
+   * Ninguém reparou porque as rotas que vendemos têm todas país
+   * definido. Mas o mapa abriu para 129 países, e agora esta
+   * fórmula é a que responde à maioria deles.
+   *
+   * Os números novos são a média das tarifas espanhola e
+   * portuguesa: 35 de base e 1,45 por quilómetro. Dá 30 euros aos
+   * 20 km e 470 aos 300 — no meio das duas, que é onde deve estar
+   * um país que ainda não estudámos.
+   */
+  return Math.max(25, (35 + distanceKm * 1.45) * vehicle.mult * noite);
 }
 
 /**
@@ -5605,6 +5621,272 @@ app.get('/api/maps/data', async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
+
+
+/**
+ * ---------------------------------------------------------------
+ * OS ERROS DO BROWSER
+ *
+ * Os alarmes cobrem tarefas e rotas — o que corre no servidor. Um
+ * erro no JavaScript do cliente não deixa rasto nenhum: a página
+ * parte, ele desiste, e nós ficamos a achar que ninguém quis
+ * reservar naquele dia.
+ *
+ * Foi exatamente o que aconteceu hoje com o pintarVistas
+ * duplicado: o painel não abria e só soubemos porque alguém
+ * reclamou.
+ *
+ * O QUE ISTO NÃO É
+ *
+ * Não é o Sentry. Não agrupa, não tem interface, não guarda
+ * histórico além da tabela. Manda um alarme quando um erro novo
+ * aparece, e cala-se quando é o mesmo repetido.
+ * ---------------------------------------------------------------
+ */
+app.post('/api/client-error', async (req, res) => {
+  /**
+   * Vinte por hora e por endereço.
+   *
+   * Um erro dentro de um ciclo dispara centenas de vezes por
+   * segundo. Sem limite, o primeiro cliente com um problema
+   * enchia a base e o Telegram.
+   */
+  if (limitar('clienterr', req, res, { max: 20, segundos: 3600 })) {
+    return;
+  }
+
+  try {
+    const { message, source, line, column, stack, url, ua } = req.body || {};
+
+    if (!message) return res.json({ ok: true });
+
+    /**
+     * A impressão digital do erro.
+     *
+     * Mesma mensagem, mesmo ficheiro, mesma linha: é o mesmo erro,
+     * mesmo que venha de mil browsers. Sem isto, um bug numa
+     * página popular manda mil alarmes iguais.
+     */
+    const digital = [
+      String(message).slice(0, 200),
+      String(source || '').split('/').pop().split('?')[0],
+      line || 0
+    ].join('|');
+
+    const { data } = await supabase.rpc('log_client_error', {
+      p_fingerprint: digital,
+      p_message: String(message).slice(0, 500),
+      p_source: String(source || '').slice(0, 300),
+      p_line: Number(line) || null,
+      p_stack: String(stack || '').slice(0, 2000),
+      p_url: String(url || '').slice(0, 300),
+      p_user_agent: String(ua || req.headers['user-agent'] || '').slice(0, 300)
+    });
+
+    /**
+     * Só o primeiro de cada tipo avisa.
+     *
+     * A função devolve is_new quando é a estreia. Os seguintes
+     * contam-se em silêncio, e o contador diz depois quantos
+     * foram.
+     */
+    if (data?.is_new) {
+      telegramTaskFailed('browser error',
+        `${String(message).slice(0, 150)}\n` +
+        `${String(source || '').split('/').pop()}:${line || '?'}\n` +
+        `on ${String(url || '').slice(0, 80)}`
+      ).catch(() => {});
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    /**
+     * Um erro a registar erros não faz barulho.
+     *
+     * Se esta rota falhar, o pior que acontece é perdermos um
+     * relatório. Fazer barulho aqui podia criar um ciclo.
+     */
+    console.error('client-error:', error.message);
+    return res.json({ ok: true });
+  }
+});
+
+
+/**
+ * ---------------------------------------------------------------
+ * APAGAR A CONTA
+ *
+ * Obrigação do RGPD, e prometida na política de privacidade desde
+ * o primeiro dia.
+ *
+ * Duas rotas: pedir e confirmar. Entre elas, um email — porque um
+ * botão que apaga tudo a um clique é um botão que se carrega por
+ * engano, e isto não tem volta.
+ * ---------------------------------------------------------------
+ */
+app.post('/api/account/delete-request', async (req, res) => {
+  if (limitar('delete', req, res, { max: 3, segundos: 3600 })) return;
+
+  try {
+    /**
+     * Só a própria pessoa.
+     *
+     * Com sessão iniciada, e o email da sessão — não o que vier no
+     * corpo do pedido. Sem isto, qualquer um podia mandar apagar a
+     * conta de outro.
+     */
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Sign in first.' });
+    }
+
+    const { data, error } = await supabase.rpc('request_deletion', {
+      p_email: user.email,
+      p_kind: req.body?.kind || 'customer'
+    });
+
+    if (error) throw error;
+
+    if (data?.ok === false) {
+      /**
+       * Bloqueada: dizer porquê, com o número.
+       *
+       * "Não pode apagar" sem explicação leva a um email para o
+       * apoio. "Tem duas viagens marcadas" resolve-se sozinho.
+       */
+      if (data.blocked) {
+        return res.status(409).json({
+          error: data.blocked.message || 'Your account cannot be closed yet.',
+          reason: data.blocked.reason,
+          count: data.blocked.count,
+          amount: data.blocked.amount
+        });
+      }
+
+      return res.status(400).json({ error: 'Could not start it.' });
+    }
+
+    // O email com o link. Sem ele, nada acontece.
+    await sendDeletionConfirm({
+      email: data.email,
+      token: data.token
+    }).catch((e) => console.error('deletion email:', e.message));
+
+    return res.json({
+      success: true,
+      message: 'Check your email. The link works for 24 hours.'
+    });
+  } catch (error) {
+    console.error('delete request:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+/**
+ * O link do email.
+ *
+ * Um GET, porque vem de um clique num email. Não leva sessão: o
+ * token é a prova, e dura 24 horas.
+ */
+app.get('/api/account/delete-confirm', async (req, res) => {
+  if (limitar('deleteconfirm', req, res, { max: 10, segundos: 3600 })) return;
+
+  const token = String(req.query.token || '');
+
+  if (!token) {
+    return res.status(400).send('Missing token.');
+  }
+
+  try {
+    const { data, error } = await supabase.rpc('confirm_deletion', {
+      p_token: token
+    });
+
+    if (error) throw error;
+
+    if (data?.ok === false) {
+      const msg = data.blocked
+        ? (data.blocked.message || 'Your account cannot be closed yet.')
+        : 'That link has expired or has already been used.';
+
+      return res.status(410).send(paginaSimples('Not done', msg));
+    }
+
+    /**
+     * E a conta de autenticação.
+     *
+     * O SQL não lhe toca — o auth.users é gerido pela API de
+     * administração do Supabase, e é aqui que se chama.
+     *
+     * Feito no fim: se falhar, os dados já saíram e o pior que
+     * acontece é ficar uma conta vazia, que não identifica
+     * ninguém.
+     */
+    if (data.user_id) {
+      try {
+        await supabase.auth.admin.deleteUser(data.user_id);
+      } catch (e) {
+        console.error('auth delete failed:', e.message);
+
+        telegramTaskFailed('account deletion',
+          `Data removed but auth user ${data.user_id} remains: ${e.message}`
+        ).catch(() => {});
+      }
+    }
+
+    console.log('[gdpr] account deleted:', data.email);
+
+    return res.send(paginaSimples(
+      'Your account is closed',
+      'Your personal details have been removed. Bookings are kept ' +
+      'without your name, because tax law requires it.'
+    ));
+  } catch (error) {
+    console.error('delete confirm:', error.message);
+
+    return res.status(500).send(paginaSimples(
+      'Something went wrong',
+      'Write to us and we will do it by hand.'
+    ));
+  }
+});
+
+
+/**
+ * Uma página inteira numa função.
+ *
+ * O link do email abre no browser, e devolver JSON a um clique de
+ * email é mostrar chavetas a alguém que esperava uma confirmação.
+ */
+function paginaSimples(titulo, texto) {
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${titulo} · Airportlink</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;
+    justify-content:center;background:#FAFAF8;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+    color:#1A1A17;padding:24px}
+  .box{max-width:440px;text-align:center}
+  h1{font-size:22px;font-weight:600;margin:0 0 12px}
+  p{font-size:15px;line-height:1.6;color:#6B6B63;margin:0 0 24px}
+  a{display:inline-block;padding:11px 22px;border-radius:10px;
+    background:#0D9488;color:#fff;text-decoration:none;
+    font-size:14px;font-weight:600}
+</style>
+</head><body>
+  <div class="box">
+    <h1>${titulo}</h1>
+    <p>${texto}</p>
+    <a href="${process.env.SITE_ORIGIN || 'https://www.airportlink.app'}">Back to the site</a>
+  </div>
+</body></html>`;
+}
 
 
 /** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. *//** Confirmar que a consulta de voos funciona. */
