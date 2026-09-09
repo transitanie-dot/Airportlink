@@ -1057,6 +1057,73 @@ app.get('/health', async (req, res) => {
  */
 /**
  * ---------------------------------------------------------------
+ * OS CABEÇALHOS DE SEGURANÇA
+ *
+ * Escritos à mão em vez do helmet. São seis linhas contra uma
+ * dependência de 90 KB — e, mais importante, escritos aqui
+ * consigo explicar o que cada um faz.
+ *
+ * Uma biblioteca que põe quinze cabeçalhos por omissão acaba por
+ * ser desligada à primeira coisa que parte, e desligada fica.
+ * ---------------------------------------------------------------
+ */
+app.use((req, res, next) => {
+  /**
+   * Só HTTPS, e o browser lembra-se.
+   *
+   * Um ano. Sem isto, alguém que escreva "airportlink.app" na
+   * barra faz o primeiro pedido em HTTP — e nesse pedido vai o
+   * cookie de sessão em claro, numa rede de aeroporto onde
+   * qualquer um o lê.
+   *
+   * Sem preload de propósito: entrar na lista do Chrome é
+   * irreversível na prática, e não se faz com um domínio de dois
+   * meses.
+   */
+  res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+
+  /**
+   * O browser não adivinha o tipo do ficheiro.
+   *
+   * Sem isto, um ficheiro que um parceiro carregue como .jpg mas
+   * que contenha HTML pode ser servido como página — e correr
+   * JavaScript no nosso domínio.
+   */
+  res.set('X-Content-Type-Options', 'nosniff');
+
+  /**
+   * Ninguém nos põe num iframe.
+   *
+   * É o ataque de sobrepor um botão invisível sobre o nosso: a
+   * pessoa julga que clica noutra coisa e reserva uma viagem.
+   */
+  res.set('X-Frame-Options', 'DENY');
+
+  /**
+   * O endereço não viaja para fora.
+   *
+   * Um link de /myaccount?booking=AL123 para um site externo
+   * levava a referência da reserva no cabeçalho Referer. Com
+   * same-origin, sites externos só recebem o domínio.
+   */
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+  /**
+   * Nada de câmara, microfone ou localização.
+   *
+   * Não usamos nenhum. Declará-lo impede que um script de
+   * terceiros os peça em nosso nome — e o pedido apareceria com o
+   * nosso nome na caixa do browser.
+   */
+  res.set('Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(self)');
+
+  next();
+});
+
+
+/**
+ * ---------------------------------------------------------------
  * UM LIMITE POR ENDEREÇO
  *
  * A rota do checkout podia ser chamada mil vezes por segundo. Cada
