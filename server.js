@@ -86,6 +86,20 @@ import { createShared } from './support-shared.js';
 import { createPartnerRoutes } from './partners.js';
 
 const app = express();
+
+/**
+ * O IP verdadeiro, atrás do proxy.
+ *
+ * O Render põe o endereço do visitante no x-forwarded-for e o seu
+ * próprio no req.ip. Sem esta linha, o limitador via todos os
+ * pedidos como vindos do mesmo sítio — e bloqueava toda a gente
+ * ao mesmo tempo, ou ninguém.
+ *
+ * O 1 diz "confia num proxy". Confiar em todos deixaria alguém
+ * forjar o cabeçalho e contornar o limite.
+ */
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
 
 if (!process.env.STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY is required');
@@ -1041,6 +1055,89 @@ app.get('/health', async (req, res) => {
  * Não apanha os 404 nem os 403: um endereço errado ou uma sessão
  * expirada não são problemas nossos.
  */
+/**
+ * ---------------------------------------------------------------
+ * UM LIMITE POR ENDEREÇO
+ *
+ * A rota do checkout podia ser chamada mil vezes por segundo. Cada
+ * chamada custa uma ida à API do Google Directions e uma ao
+ * Stripe — e a quota do Google é diária.
+ *
+ * Um script simples esvaziava-a numa hora, e a partir daí nenhum
+ * cliente conseguia um preço. Não é preciso má intenção: um bot de
+ * indexação mal configurado faz o mesmo.
+ *
+ * SEM DEPENDÊNCIAS
+ *
+ * O express-rate-limit resolveria isto, mas são mais 200 KB e uma
+ * atualização a acompanhar. Um Map em memória chega para um
+ * servidor só — e é o que temos.
+ *
+ * O QUE ISTO NÃO É
+ *
+ * Não é proteção contra um ataque a sério: um atacante com mil
+ * endereços passa. É proteção contra o caso comum — um script, um
+ * bot, um botão carregado vinte vezes por impaciência.
+ * ---------------------------------------------------------------
+ */
+const janelas = new Map();
+
+function limitar(nome, req, res, { max, segundos }) {
+  /**
+   * O endereço real, atrás do proxy.
+   *
+   * O Render põe o IP verdadeiro no x-forwarded-for. Sem isto,
+   * todos os pedidos vinham do mesmo endereço — o do proxy — e o
+   * limite bloqueava toda a gente ao mesmo tempo.
+   */
+  const ip = String(req.headers['x-forwarded-for'] || '')
+    .split(',')[0].trim() || req.ip || 'sem-ip';
+
+  const chave = `${nome}:${ip}`;
+  const agora = Date.now();
+
+  let j = janelas.get(chave);
+
+  if (!j || agora > j.ate) {
+    j = { contagem: 0, ate: agora + segundos * 1000 };
+    janelas.set(chave, j);
+  }
+
+  j.contagem += 1;
+
+  if (j.contagem > max) {
+    const faltam = Math.ceil((j.ate - agora) / 1000);
+
+    res.set('Retry-After', String(faltam));
+
+    res.status(429).json({
+      error: 'Too many requests. Wait a moment and try again.',
+      retry_after_seconds: faltam
+    });
+
+    return true;
+  }
+
+  return false;
+}
+
+
+/**
+ * A memória não cresce sem fim.
+ *
+ * Cada endereço que chegue deixa uma entrada. Sem limpeza, um mês
+ * de tráfego são centenas de milhares de linhas num Map que nunca
+ * é lido outra vez.
+ */
+setInterval(() => {
+  const agora = Date.now();
+
+  for (const [k, j] of janelas) {
+    if (agora > j.ate) janelas.delete(k);
+  }
+}, 60000).unref();
+
+
 app.use((req, res, next) => {
   // As tarefas têm o seu próprio middleware, mais detalhado.
   if (req.path.startsWith('/api/tasks')) return next();
@@ -1757,6 +1854,9 @@ app.post('/api/internal/calendar-sync', async (req, res) => {
  */
 
 app.get('/api/exchange-rates', async (req, res) => {
+  // Sessenta por minuto: é lida no arranque de cada página.
+  if (limitar('rates', req, res, { max: 60, segundos: 60 })) return;
+
   const { rates, source } = await loadExchangeRates();
   const withMargin = {};
 
@@ -2011,6 +2111,15 @@ app.post('/register', async (req, res) => {
  * antes de haver sessão.
  */
 app.get('/api/coverage', async (req, res) => {
+  /**
+   * Trinta por minuto.
+   *
+   * Chamada a cada cálculo de preço, e um cliente indeciso muda de
+   * morada várias vezes. Mais generosa que o checkout porque só
+   * toca na nossa base.
+   */
+  if (limitar('coverage', req, res, { max: 30, segundos: 60 })) return;
+
   try {
     const de = String(req.query.from || '');
     const para = String(req.query.to || '');
@@ -2057,6 +2166,15 @@ app.get('/api/coverage', async (req, res) => {
 
 
 app.post('/api/create-checkout-session', async (req, res) => {
+  /**
+   * Oito por minuto.
+   *
+   * É a rota mais cara: uma ida ao Google Directions e uma ao
+   * Stripe por chamada. Ninguém reserva oito viagens num minuto —
+   * e quem tenta está a testar ou a carregar no botão repetido.
+   */
+  if (limitar('checkout', req, res, { max: 8, segundos: 60 })) return;
+
   const { booking } = req.body;
 
   if (!booking || !booking.pickup || !booking.dropoff || !booking.email) {
@@ -2550,6 +2668,15 @@ async function repairBookingFromSession(session) {
 }
 
 app.post('/api/confirm-payment', async (req, res) => {
+  /**
+   * Vinte por minuto.
+   *
+   * A página de sucesso chama-a uma vez. Vinte dá margem para
+   * recarregamentos sem abrir a porta a quem queira adivinhar
+   * identificadores de sessão.
+   */
+  if (limitar('confirm', req, res, { max: 20, segundos: 60 })) return;
+
   const { session_id } = req.body;
 
   if (!session_id) {
