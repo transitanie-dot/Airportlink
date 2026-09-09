@@ -1126,6 +1126,73 @@ export async function sendTicketReply(chat, mensagem, agente) {
 }
 
 
+/**
+ * O link para apagar a conta.
+ *
+ * Um passo a mais entre o pedido e o apagar. É de propósito: um
+ * botão que apaga tudo a um clique é um botão que se carrega por
+ * engano, e isto não tem volta.
+ *
+ * E confirma que o email é mesmo da pessoa — sem isso, bastava
+ * saber o endereço de alguém para lhe fechar a conta.
+ */
+export async function sendDeletionConfirm({ email, token }) {
+  try {
+    if (!email || !token) return { sent: false, reason: 'missing' };
+
+    const link = `${SITE}/api/account/delete-confirm?token=${token}`;
+
+    const html = wrap({
+      preheader: 'Confirm you want to close your account.',
+      heading: 'Close your account?',
+
+      intro: 'Someone asked to close the Airportlink account for this ' +
+             'email address. If it was you, confirm below.',
+
+      blocks: [
+        {
+          type: 'note',
+          tone: 'warn',
+          text: 'This cannot be undone. Your name, phone number and ' +
+                'addresses are removed. Past bookings are kept without ' +
+                'your details, because tax law requires it.'
+        },
+
+        {
+          type: 'note',
+          text: 'If it was not you, ignore this email. Nothing happens ' +
+                'without the button below, and the link stops working ' +
+                'in 24 hours.'
+        }
+      ],
+
+      cta: {
+        label: 'Yes, close my account',
+        url: link
+      }
+    });
+
+    return await sendOnce({
+      /**
+       * A hora entra na chave.
+       *
+       * Um pedido novo depois de um expirado tem de mandar email
+       * outra vez. Sem isto, quem deixasse o primeiro expirar não
+       * conseguia pedir de novo.
+       */
+      key: `deletion:${email}:${Date.now()}`,
+      template: 'deletion_confirm',
+      to: email,
+      subject: 'Confirm closing your Airportlink account',
+      html
+    });
+  } catch (error) {
+    console.error('sendDeletionConfirm failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendDriverArrived(booking, driver) {
   try {
     const ref = reference(booking);
