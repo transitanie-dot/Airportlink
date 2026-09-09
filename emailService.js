@@ -432,7 +432,23 @@ export async function sendBookingConfirmation(booking, passwordLink, returnLeg) 
           { label: 'Passengers', value: booking.passengers },
           { label: 'Flight', value: booking.flight_number },
           { label: returnLeg ? 'This leg' : 'Paid',
-            value: money(booking.price, booking.currency) }
+            value: money(booking.price, booking.currency) },
+
+          /**
+           * O suplemento noturno, aqui e não na calculadora.
+           *
+           * Antes de comprar, o cliente vê o preço e decide —
+           * explicar a mecânica convida a discutir uma regra que
+           * não vai mudar.
+           *
+           * No recibo é o contrário: é onde se procura quando se
+           * quer perceber um valor, e uma linha a dizer porquê
+           * evita um email a perguntar.
+           */
+          { label: 'Night surcharge',
+            value: booking.night_surcharge
+              ? '20% (pick-up between 22:55 and 06:00)'
+              : null }
         ]},
         { type: 'route', from: booking.pickup, to: booking.dropoff },
 
