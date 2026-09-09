@@ -288,6 +288,16 @@ function corpo(booking, partner) {
     : null;
 
   /**
+   * A marca da noite.
+   *
+   * Um transfer às três da manhã é mais difícil de atribuir: há
+   * menos motoristas disponíveis e quem aceita costuma querer
+   * saber antes. Ver isso na agenda, sem abrir o evento, poupa
+   * uma verificação.
+   */
+  const noturno = booking.night_surcharge ? '🌙' : null;
+
+  /**
    * A referência fica na descrição, não no título.
    *
    * O título é para se ler de relance na vista de mês — o carro, o
@@ -298,6 +308,7 @@ function corpo(booking, partner) {
    */
   const titulo = [
     marca,
+    noturno,
     perna,
     cancelada ? (CARRO[chave] || chave) : null,
     `${de} → ${para}`,
@@ -325,7 +336,8 @@ function corpo(booking, partner) {
     booking.flight_number ? `Flight: ${booking.flight_number}` : '',
     booking.preferred_language ? `Language: ${booking.preferred_language}` : '',
     '',
-    `Price: ${Number(booking.price || 0).toFixed(2)} ${String(booking.currency || 'EUR').toUpperCase()}`,
+    `Price: ${Number(booking.price || 0).toFixed(2)} ${String(booking.currency || 'EUR').toUpperCase()}` +
+      (booking.night_surcharge ? '  (includes 20% night surcharge)' : ''),
     booking.amount_total != null ? 'Paid now' : 'Pay later',
     '',
     temMotorista
