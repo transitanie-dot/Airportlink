@@ -2267,6 +2267,197 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   /**
+   * ---------------------------------------------------------------
+   * O QUE O BROWSER VERIFICA, O SERVIDOR VERIFICA OUTRA VEZ
+   *
+   * O telefone passou sem validação até uma reserva chegar sem
+   * ele. A verificação vivia só no browser — e um browser é código
+   * que corre na máquina de outra pessoa.
+   *
+   * Não é preciso má intenção: uma extensão, um autopreenchimento
+   * estranho, ou uma chamada direta à rota. A regra é simples — se
+   * a reserva não serve sem o campo, o servidor recusa.
+   * ---------------------------------------------------------------
+   */
+
+  /**
+   * O email tem de ser um email.
+   *
+   * É por onde vai a confirmação, o recibo e o lembrete de 24
+   * horas. Um endereço errado é uma reserva que existe e um
+   * cliente que não sabe.
+   *
+   * A verificação é a mínima que faz sentido: alguma coisa, arroba,
+   * alguma coisa, ponto, duas letras. Validar emails a sério é
+   * impossível — o único teste real é mandar um.
+   */
+  const email = String(booking.email).trim();
+
+  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) {
+    return res.status(400).json({
+      error: 'That email address does not look right. ' +
+             'Check it — the confirmation goes there.'
+    });
+  }
+
+  /**
+   * A data: existe, é uma data, e não é no passado.
+   *
+   * Sem isto, uma reserva para ontem entrava no sistema, aparecia
+   * no calendário e ninguém a podia fazer. E uma para 2031 ocupava
+   * a agenda para sempre.
+   */
+  const dataStr = String(booking.booking_date || '');
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dataStr)) {
+    return res.status(400).json({ error: 'Pick a travel date.' });
+  }
+
+  const horaStr = String(booking.booking_time || '');
+
+  if (!/^\d{2}:\d{2}$/.test(horaStr)) {
+    return res.status(400).json({ error: 'Pick a pick-up time.' });
+  }
+
+  const quando = new Date(`${dataStr}T${horaStr}:00`);
+
+  if (Number.isNaN(quando.getTime())) {
+    return res.status(400).json({ error: 'That date and time are not valid.' });
+  }
+
+  /**
+   * Duas horas de margem.
+   *
+   * É o mínimo para encontrar um motorista, ele receber a viagem e
+   * chegar ao aeroporto. Uma reserva para daqui a vinte minutos é
+   * uma que vai falhar — e é melhor recusá-la do que devolver o
+   * dinheiro depois.
+   */
+  const MARGEM_HORAS = 2;
+  const agora = Date.now();
+
+  if (quando.getTime() < agora + MARGEM_HORAS * 3600000) {
+    return res.status(400).json({
+      error: 'We need at least two hours to arrange a driver. ' +
+             'Pick a later time, or call us if it is urgent.'
+    });
+  }
+
+  /**
+   * E não mais de dois anos.
+   *
+   * Ninguém reserva um transfer para daqui a três anos. Um ano de
+   * distância já é raro; dois é a margem que não incomoda ninguém e
+   * apanha um erro de digitação no ano.
+   */
+  if (quando.getTime() > agora + 730 * 86400000) {
+    return res.status(400).json({
+      error: 'That date is too far ahead. Check the year.'
+    });
+  }
+
+  /**
+   * Os passageiros: um número, e um que caiba num carro.
+   *
+   * Zero passageiros dava um preço mínimo e uma viagem sem
+   * ninguém. Cem dava um multiplicador absurdo — ou, pior, o
+   * mínimo, porque nenhuma classe correspondia.
+   */
+  const pax = Number(booking.passengers);
+
+  if (!Number.isInteger(pax) || pax < 1 || pax > 16) {
+    return res.status(400).json({
+      error: 'Passengers must be between 1 and 16. ' +
+             'For a larger group, write to us and we will arrange it.'
+    });
+  }
+
+  /**
+   * As moradas: alguma coisa que se possa escrever numa placa.
+   *
+   * Uma morada de três letras não leva ninguém a lado nenhum, e o
+   * Google devolve-a como um sítio qualquer do mundo.
+   */
+  for (const [campo, valor] of [
+    ['pickup', booking.pickup],
+    ['dropoff', booking.dropoff]
+  ]) {
+    if (String(valor).trim().length < 4) {
+      return res.status(400).json({
+        error: `The ${campo === 'pickup' ? 'pick-up' : 'drop-off'} ` +
+               'address is too short. Pick one from the suggestions.'
+      });
+    }
+  }
+
+  /**
+   * A classe de viatura, se vier.
+   *
+   * É opcional — sem ela, escolhe-se pelo número de passageiros.
+   * Mas se vier, tem de existir: uma classe inventada caía no
+   * ramo de omissão do cálculo e dava um preço que não é de
+   * nenhuma viatura.
+   */
+  if (booking.vehicle_class) {
+    const classes = ['sedan', 'van', 'premium', 'minibus'];
+
+    if (!classes.includes(String(booking.vehicle_class).toLowerCase())) {
+      return res.status(400).json({ error: 'Unknown vehicle class.' });
+    }
+  }
+
+  /**
+   * O voo, se vier, tem forma de voo.
+   *
+   * Duas ou três letras e até quatro dígitos. Não confirmamos que
+   * existe — isso é o AeroDataBox que faz depois — mas um campo
+   * com trezentos caracteres não é um número de voo, e o que lá
+   * estiver vai parar ao calendário e ao SMS do motorista.
+   */
+  if (booking.flight_number) {
+    const voo = String(booking.flight_number).trim().toUpperCase();
+
+    if (!/^[A-Z0-9]{2,3}\s?\d{1,4}[A-Z]?$/.test(voo)) {
+      return res.status(400).json({
+        error: 'That flight number does not look right. Example: TP1234.'
+      });
+    }
+
+    booking.flight_number = voo;
+  }
+
+  /**
+   * O nome: alguma coisa que se possa escrever numa placa.
+   *
+   * Duas letras não é um nome, e é o que o motorista mostra na
+   * chegada.
+   */
+  const nome = String(booking.full_name || booking.passenger_name || '').trim();
+
+  if (nome.length < 2) {
+    return res.status(400).json({
+      error: 'A name is needed — the driver holds a sign with it.'
+    });
+  }
+
+  /**
+   * E o tamanho de tudo o resto.
+   *
+   * Um campo de notas com cem mil caracteres enche a base, quebra
+   * o email e nunca é lido. O corte é generoso: quinhentos
+   * caracteres dão para escrever "somos quatro com um carrinho de
+   * bebé e chegamos do voo da TAP".
+   */
+  for (const [campo, max] of [
+    ['pickup', 300], ['dropoff', 300], ['notes', 500],
+    ['full_name', 120], ['passenger_name', 120], ['email', 200]
+  ]) {
+    if (booking[campo] && String(booking[campo]).length > max) {
+      booking[campo] = String(booking[campo]).slice(0, max);
+    }
+  }
+
+  /**
    * O telefone é obrigatório, e a verificação tem de estar AQUI.
    *
    * O checkout já o exigia, mas uma reserva chegou sem ele — o que
@@ -4718,6 +4909,110 @@ app.post('/api/booking/change', async (req, res) => {
 
   if (!booking_id || !changes || !Object.keys(changes).length) {
     return res.status(400).json({ error: 'Send booking_id and what to change.' });
+  }
+
+  /**
+   * As mesmas regras da criação.
+   *
+   * Uma reserva criada com data válida podia ser alterada para
+   * ontem — a validação estava só na criação, e o browser é que
+   * verificava aqui.
+   *
+   * Só se verifica o que vem: uma alteração que mude só a morada
+   * não tem de trazer a data.
+   */
+  const SO_ESTES = ['booking_date', 'booking_time', 'passengers',
+                    'pickup', 'dropoff', 'flight_number', 'notes'];
+
+  for (const k of Object.keys(changes)) {
+    if (!SO_ESTES.includes(k)) {
+      /**
+       * O que não está na lista sai.
+       *
+       * Sem isto, uma alteração podia trazer "price" ou "status" e
+       * o apply_booking_change escrevia-os. Uma reserva de 300
+       * euros passava a 5 com um pedido bem feito.
+       */
+      delete changes[k];
+    }
+  }
+
+  if (!Object.keys(changes).length) {
+    return res.status(400).json({ error: 'Nothing that can be changed.' });
+  }
+
+  if (changes.booking_date !== undefined) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(changes.booking_date))) {
+      return res.status(400).json({ error: 'That date is not valid.' });
+    }
+  }
+
+  if (changes.booking_time !== undefined) {
+    if (!/^\d{2}:\d{2}$/.test(String(changes.booking_time))) {
+      return res.status(400).json({ error: 'That time is not valid.' });
+    }
+  }
+
+  /**
+   * E a data nova não pode ser no passado.
+   *
+   * A verificação usa a data nova quando ela vem, e a antiga
+   * quando só muda a hora — senão, mudar a hora de uma reserva de
+   * amanhã seria recusado por causa da data de hoje.
+   */
+  if (changes.booking_date !== undefined || changes.booking_time !== undefined) {
+    const { data: atual } = await supabase
+      .from('bookings')
+      .select('booking_date, booking_time')
+      .eq('id', booking_id)
+      .maybeSingle();
+
+    const d = changes.booking_date ?? atual?.booking_date;
+    const h = changes.booking_time ?? atual?.booking_time ?? '00:00';
+
+    const quando = new Date(`${d}T${h}:00`);
+
+    if (Number.isNaN(quando.getTime())) {
+      return res.status(400).json({ error: 'That date and time are not valid.' });
+    }
+
+    if (quando.getTime() < Date.now() + 2 * 3600000) {
+      return res.status(400).json({
+        error: 'We need at least two hours to arrange a driver.'
+      });
+    }
+  }
+
+  if (changes.passengers !== undefined) {
+    const pax = Number(changes.passengers);
+
+    if (!Number.isInteger(pax) || pax < 1 || pax > 16) {
+      return res.status(400).json({ error: 'Passengers must be between 1 and 16.' });
+    }
+  }
+
+  for (const campo of ['pickup', 'dropoff']) {
+    if (changes[campo] !== undefined &&
+        String(changes[campo]).trim().length < 4) {
+      return res.status(400).json({ error: 'That address is too short.' });
+    }
+  }
+
+  if (changes.flight_number) {
+    const voo = String(changes.flight_number).trim().toUpperCase();
+
+    if (!/^[A-Z0-9]{2,3}\s?\d{1,4}[A-Z]?$/.test(voo)) {
+      return res.status(400).json({ error: 'That flight number does not look right.' });
+    }
+
+    changes.flight_number = voo;
+  }
+
+  // E o tamanho, como na criação.
+  for (const [campo, max] of [['pickup', 300], ['dropoff', 300], ['notes', 500]]) {
+    if (changes[campo]) {
+      changes[campo] = String(changes[campo]).slice(0, max);
+    }
   }
 
   try {
