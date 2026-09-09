@@ -536,9 +536,56 @@ function routeOverride(zoneName, dropoffText) {
   return null;
 }
 
+/**
+ * O suplemento noturno.
+ *
+ * Entre as 22h55 e as 6h o preço sobe 20%. É o que a Transfeero
+ * cobra — em Bilbao, 251,42 de dia e 301,70 de noite, que é
+ * exatamente 1,2 vezes.
+ *
+ * A razão é real: um transfer às três da manhã custa mais ao
+ * parceiro. O motorista dorme mal, há menos gente disponível, e
+ * quem aceita cobra mais.
+ *
+ * As 22h55 e não as 23h porque a hora de recolha de um voo que
+ * aterra às 23h é quase sempre uns minutos antes. Cortar às 23h
+ * deixava de fora metade dos voos noturnos.
+ */
+const NIGHT_FROM = 22 * 60 + 55;   // 22:55
+const NIGHT_TO = 6 * 60;           // 06:00
+const NIGHT_MULT = 1.2;
+
+function isNightPickup(timeStr) {
+  if (!timeStr) return false;
+
+  const m = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return false;
+
+  const minutos = Number(m[1]) * 60 + Number(m[2]);
+
+  /**
+   * A janela atravessa a meia-noite.
+   *
+   * Das 22h55 às 23h59 E das 00h00 às 05h59. Escrito como um
+   * intervalo normal daria sempre falso.
+   */
+  return minutos >= NIGHT_FROM || minutos < NIGHT_TO;
+}
+
+
 function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
   const o = opts || {};
   const vehicle = resolveVehicleClass(o.vehicleClass, passengers);
+
+  /**
+   * O suplemento aplica-se no fim, ao preço final.
+   *
+   * Aplicá-lo à base antes do multiplicador da viatura daria
+   * números diferentes conforme a classe — e um cliente que compare
+   * um sedan com uma van não deve encontrar percentagens
+   * diferentes.
+   */
+  const noite = isNightPickup(o.pickupTime) ? NIGHT_MULT : 1;
 
   const country = detectCountry(o.pickupText, o.dropoffText) ||
     (isPortugalRoute ? 'PT' : null);
@@ -555,14 +602,14 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
     // Rota com preço combinado ganha à fórmula.
     const fixed = zoneName ? routeOverride(zoneName, o.dropoffText) : null;
     if (fixed) {
-      if (vehicle.id === 'sedan') return fixed.sedan;
-      if (vehicle.id === 'premium') return fixed.premium;
-      return fixed.sedan * (zone[vehicle.id] || vehicle.mult);
+      if (vehicle.id === 'sedan') return fixed.sedan * noite;
+      if (vehicle.id === 'premium') return fixed.premium * noite;
+      return fixed.sedan * (zone[vehicle.id] || vehicle.mult) * noite;
     }
 
     const mult = vehicle.id === 'sedan' ? 1 : (zone[vehicle.id] || vehicle.mult);
 
-    return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult);
+    return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult * noite);
   }
 
   if (country === 'IT') {
@@ -580,22 +627,23 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
     // crescem ao mesmo ritmo, e um multiplicador falharia nas
     // pontas.
     if (vehicle.id === 'premium') {
-      return Math.max(24, zone.premiumBase + distanceKm * zone.premiumKm);
+      return Math.max(24, (zone.premiumBase + distanceKm * zone.premiumKm) * noite);
     }
 
-    if (vehicle.id === 'sedan') return Math.max(24, sedan);
+    if (vehicle.id === 'sedan') return Math.max(24, sedan * noite);
 
     // As classes maiores continuam a sair do sedan.
-    return Math.max(24, sedan * (zone[vehicle.id] || vehicle.mult));
+    return Math.max(24, sedan * (zone[vehicle.id] || vehicle.mult) * noite);
   }
 
   if (country === 'PT') {
     const zone = detectZone(PT_ZONES, PT_FALLBACK, o.pickupText, o.dropoffText);
-    return Math.max(24, (zone.base + distanceKm * zone.perKm) * vehicle.mult);
+    return Math.max(24, (zone.base + distanceKm * zone.perKm) * vehicle.mult * noite);
   }
 
   // Sem país estudado, a fórmula antiga.
-  return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult);
+  // Sem país estudado, a fórmula antiga — com a noite na mesma.
+  return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult * noite);
 }
 
 /**
@@ -1956,9 +2004,22 @@ app.post('/api/create-checkout-session', async (req, res) => {
     {
       vehicleClass: booking.vehicle_class,
       pickupText: booking.pickup,
-      dropoffText: booking.dropoff
+      dropoffText: booking.dropoff,
+
+      // A hora decide o suplemento noturno: 20% entre as 22h55 e
+      // as 6h.
+      pickupTime: booking.booking_time || booking.time
     }
   );
+
+  /**
+   * Se foi de noite.
+   *
+   * Guardado na reserva para os emails, o calendário, o painel e o
+   * Telegram não terem de repetir a regra. Uma regra em cinco
+   * sítios é uma regra que vai divergir.
+   */
+  const temNoite = isNightPickup(booking.booking_time || booking.time);
 
   // Se quem pede for um agente aprovado, aplica-se a margem dele.
   // O browser não tem palavra nenhuma nisto.
@@ -2111,6 +2172,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   metadata.payment_mode = payLater ? 'later' : 'now';
 
+  // Viaja nos metadados: o webhook não recalcula a regra.
+  metadata.night_surcharge = temNoite ? 'true' : 'false';
+
   if (payLater) {
     const pickupAt = new Date(`${metadata.booking_date}T${metadata.booking_time || '00:00'}`);
     metadata.charge_at = new Date(
@@ -2217,6 +2281,10 @@ app.post('/api/create-checkout-session', async (req, res) => {
       sessionId: session.id,
       payment_mode: payLater ? 'later' : 'now',
       charge_at: metadata.charge_at || null,
+
+      // Para o site poder dizer porquê, se quiser.
+      night_surcharge: temNoite,
+
       agent: agent
         ? { commission, agency_name: agent.agency_name }
         : null
@@ -3523,6 +3591,16 @@ app.post('/api/stripe-webhook', async (req, res) => {
       preferred_languages: metadata.preferred_languages
         ? metadata.preferred_languages.split(',').filter(Boolean)
         : null,
+      /**
+       * O suplemento noturno fica na reserva.
+       *
+       * Recalculá-lo depois obrigava a repetir a regra em cada
+       * sítio que a quisesse mostrar — nos emails, no calendário,
+       * no painel, no Telegram. Uma regra em cinco sítios é uma
+       * regra que vai divergir.
+       */
+      night_surcharge: metadata.night_surcharge === 'true',
+
       status: payLater ? 'confirmed' : (metadata.status || session.payment_status || 'paid'),
       payment_status: payLater ? 'card_saved' : (session.payment_status || null),
       payment_mode: payLater ? 'later' : 'now',
@@ -4329,13 +4407,24 @@ app.post('/api/booking/change', async (req, res) => {
 
       novoKm = rota.distanceKm;
 
-      novoPreco = computePriceEUR({
-        distanceKm: rota.distanceKm,
-        passengers: pax,
-        pickup: de,
-        dropoff: para,
-        isPortugalRoute: rota.isPortugalRoute
-      });
+      /**
+       * A assinatura certa.
+       *
+       * Estava a passar um objeto único, e a função espera quatro
+       * argumentos. O distanceKm chegava como objeto e o preço
+       * saía sempre o mínimo — 24 euros para qualquer alteração.
+       */
+      novoPreco = computePriceEUR(
+        rota.distanceKm,
+        pax,
+        rota.isPortugalRoute,
+        {
+          vehicleClass: booking.vehicle_class,
+          pickupText: de,
+          dropoffText: para,
+          pickupTime: changes.booking_time || booking.booking_time
+        }
+      );
     }
 
     const { data: result, error } = await supabase.rpc('apply_booking_change', {
