@@ -164,7 +164,7 @@ export async function telegramTaskFailed(tarefa, erro, detalhe) {
   }
 
   const linhas = [
-    `⚠️ <b>${esc(tarefa)}</b> failed`,
+    `⚠️ *${esc(tarefa)}* failed`,
     '',
     esc(String(erro).slice(0, 300))
   ];
@@ -173,11 +173,19 @@ export async function telegramTaskFailed(tarefa, erro, detalhe) {
     linhas.push('', esc(String(detalhe).slice(0, 300)));
   }
 
-  linhas.push('', `<i>${new Date().toLocaleString('en-GB', {
+  /**
+   * A data também passa pelo esc.
+   *
+   * "09 Sep, 14:32" tem uma vírgula e um ponto — ambos reservados
+   * no MarkdownV2. Sem escapar, o Telegram recusa a mensagem
+   * inteira com "can't parse entities", e o alarme perde-se
+   * exatamente quando é preciso.
+   */
+  linhas.push('', `_${esc(new Date().toLocaleString('en-GB', {
     timeZone: 'America/Recife',
     day: '2-digit', month: 'short',
     hour: '2-digit', minute: '2-digit'
-  })}</i>`);
+  }))}_`);
 
   return send(ALERTS, linhas.join('\n'), { silent: false });
 }
@@ -202,7 +210,7 @@ export async function telegramTaskRecovered(tarefa) {
   }
 
   return send(ALERTS,
-    `✅ <b>${esc(tarefa)}</b> is working again`,
+    `✅ *${esc(tarefa)}* is working again`,
     { silent: true });
 }
 
