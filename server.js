@@ -2583,10 +2583,29 @@ app.post('/api/confirm-payment', async (req, res) => {
       console.error('[confirm] repair failed:', error.message);
     }
 
+    /**
+     * O que a página de sucesso precisa para a conversão.
+     *
+     * O valor em euros e a referência da reserva. Sem eles, o
+     * Analytics recebia uma venda sem valor — e uma venda sem
+     * valor não distingue um transfer de 25 euros de um de 300.
+     */
+    const { data: reserva } = await supabase
+      .from('bookings')
+      .select('booking_id, price_eur, price, payment_mode, trip_group_id')
+      .eq('stripe_checkout_session_id', session.id)
+      .maybeSingle();
+
     return res.json({
       id: session.id,
       status: session.status,
       payment_status: session.payment_status,
+
+      booking_id: reserva?.booking_id || null,
+      price_eur: reserva?.price_eur || reserva?.price || null,
+      payment_mode: reserva?.payment_mode || null,
+      trip_group_id: reserva?.trip_group_id || null,
+
       customer_email:
         session.customer_email ||
         session.customer_details?.email ||
