@@ -647,6 +647,69 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
 }
 
 /**
+ * Servimos aqui?
+ *
+ * A calculadora dava preço para qualquer sítio do mundo. Um
+ * cliente em Bogotá recebia um valor, pagava, e depois não havia
+ * ninguém para o levar — e a devolução do dinheiro não devolve a
+ * confiança.
+ *
+ * A resposta vem dos aeroportos operacionais: 440 aeroportos em
+ * 129 países. Se a morada não cair em nenhum país da lista,
+ * dizemos que ainda não estamos lá.
+ *
+ * A lista é a mesma que os parceiros veem ao registar-se. Abrir um
+ * mercado novo é uma linha de SQL, e a calculadora acompanha
+ * sozinha.
+ */
+let paisesCache = { set: null, at: 0 };
+
+async function paisesQueServimos() {
+  if (paisesCache.set && Date.now() - paisesCache.at < 60 * 60 * 1000) {
+    return paisesCache.set;
+  }
+
+  const { data } = await supabase
+    .from('airports')
+    .select('country')
+    .eq('operational', true);
+
+  const paises = new Set((data || []).map((a) => a.country).filter(Boolean));
+
+  paisesCache = { set: paises, at: Date.now() };
+
+  return paises;
+}
+
+
+/**
+ * O país de uma morada, pelo texto.
+ *
+ * O Google devolve o nome do país no fim da morada formatada —
+ * "Rua X, Lisboa, Portugal". É o que se procura, e é suficiente
+ * para o que isto decide.
+ */
+async function paisDaMorada(texto) {
+  if (!texto) return null;
+
+  const paises = await paisesQueServimos();
+  const lower = String(texto).toLowerCase();
+
+  for (const p of paises) {
+    // No fim da morada, que é onde o Google o põe.
+    if (lower.endsWith(p.toLowerCase())) return p;
+  }
+
+  // E em qualquer sítio, se não estiver no fim.
+  for (const p of paises) {
+    if (lower.includes(p.toLowerCase())) return p;
+  }
+
+  return null;
+}
+
+
+/**
  * O aeroporto da recolha, a partir do texto que o cliente escreveu.
  *
  * É o que liga uma reserva aos parceiros que a podem fazer, por isso
@@ -1937,6 +2000,62 @@ app.post('/register', async (req, res) => {
   }
 });
 
+/**
+ * Servimos entre estes dois sítios?
+ *
+ * A calculadora pergunta antes de mostrar um preço. Dar um valor
+ * para um sítio onde não há ninguém é vender uma coisa que não
+ * existe — e a devolução do dinheiro não devolve a confiança.
+ *
+ * Pública: é a primeira coisa que acontece numa reserva, muito
+ * antes de haver sessão.
+ */
+app.get('/api/coverage', async (req, res) => {
+  try {
+    const de = String(req.query.from || '');
+    const para = String(req.query.to || '');
+
+    if (!de && !para) {
+      return res.status(400).json({ error: 'Send from and to.' });
+    }
+
+    const paisDe = await paisDaMorada(de);
+    const paisPara = await paisDaMorada(para);
+
+    /**
+     * Basta um dos lados.
+     *
+     * Um transfer de Faro para Sevilha atravessa a fronteira, e os
+     * dois países estão na lista. Mas um de Lisboa para uma aldeia
+     * cujo nome o Google escreve sem o país também deve passar —
+     * exigir os dois recusaria viagens que sabemos fazer.
+     */
+    const servimos = Boolean(paisDe || paisPara);
+
+    return res.json({
+      covered: servimos,
+      from_country: paisDe,
+      to_country: paisPara,
+
+      message: servimos ? null
+        : 'We are not operating here yet. Write to us and we will ' +
+          'tell you when we are.'
+    });
+  } catch (error) {
+    console.error('coverage:', error.message);
+
+    /**
+     * Na dúvida, deixa passar.
+     *
+     * Uma falha desta rota não deve impedir uma reserva de um
+     * sítio onde servimos. O checkout verifica outra vez, e é lá
+     * que a decisão conta.
+     */
+    return res.json({ covered: true, error: error.message });
+  }
+});
+
+
 app.post('/api/create-checkout-session', async (req, res) => {
   const { booking } = req.body;
 
@@ -1994,6 +2113,23 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
     return res.status(400).json({
       error: 'Could not calculate the route for this pickup/dropoff.'
+    });
+  }
+
+  /**
+   * A última verificação, antes de cobrar.
+   *
+   * A calculadora já perguntou, mas o browser pode mentir — e uma
+   * reserva paga para um sítio onde não há ninguém custa mais a
+   * desfazer do que a recusar.
+   */
+  const cobertoDe = await paisDaMorada(booking.pickup);
+  const cobertoPara = await paisDaMorada(booking.dropoff);
+
+  if (!cobertoDe && !cobertoPara) {
+    return res.status(400).json({
+      error: 'We are not operating in that country yet. ' +
+             'Write to us and we will tell you when we are.'
     });
   }
 
