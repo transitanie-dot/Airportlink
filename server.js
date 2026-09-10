@@ -23,6 +23,21 @@ import {
 } from './telegram.js';
 
 /**
+ * O cálculo de preços vive num ficheiro só.
+ *
+ * Estava aqui e no browser — duas cópias, duas verdades. Mudei
+ * uma e a outra ficou para trás, e um cliente viu 87 euros na
+ * calculadora e 30 no checkout.
+ *
+ * Agora é o precos.js, e é ele que os testes verificam.
+ */
+import {
+  computePriceEUR,
+  isNightPickup,
+  resolveVehicleClass
+} from './precos.js';
+
+/**
  * As viagens na agenda.
  *
  * Turquesa sem motorista, azul escuro com. A cor muda sozinha
@@ -243,13 +258,7 @@ function convertFromEUR(amountEUR, currency, rates) {
  * motorista, o segundo regresso vazio e a coordenação entre viaturas.
  * Continua muito abaixo dos 24% que a Transfeero cobra em Espanha.
  */
-const VEHICLE_CLASSES = {
-  sedan:     { id: 'sedan',     mult: 1.0,  seats: 3 },
-  premium:   { id: 'premium',   mult: 1.47, seats: 4 },
-  van:       { id: 'van',       mult: 1.7,  seats: 8 },
-  van_sedan: { id: 'van_sedan', mult: 2.85, seats: 12 },
-  two_vans:  { id: 'two_vans',  mult: 3.6,  seats: 16 }
-};
+
 
 /**
  * A classe pedida, ou a mais barata em que o grupo cabe.
@@ -257,17 +266,7 @@ const VEHICLE_CLASSES = {
  * Também é a rede de segurança: 6 pessoas num "sedan" sobem para a
  * van — nunca se vende um carro onde o grupo não cabe.
  */
-function resolveVehicleClass(requested, passengers) {
-  const pax = Math.max(1, Math.min(16, parseInt(passengers || '1', 10) || 1));
-  const wanted = VEHICLE_CLASSES[String(requested || '').toLowerCase()];
 
-  if (wanted && pax <= wanted.seats) return wanted;
-
-  for (const c of ['sedan', 'van', 'van_sedan', 'two_vans']) {
-    if (pax <= VEHICLE_CLASSES[c].seats) return VEHICLE_CLASSES[c];
-  }
-  return VEHICLE_CLASSES.two_vans;
-}
 
 function toStripeAmount(amount, currencyCode) {
   const code = (currencyCode || 'EUR').toUpperCase();
@@ -297,22 +296,9 @@ function fromStripeAmount(amount, currencyCode) {
  * medidos. Cada cidade tem MESMO tabela própria: o Porto custa 51%
  * mais por km do que Lisboa; uma fórmula nacional falhava sempre.
  */
-const PT_ZONES = {
-  lisbon: { base: 23.23, perKm: 0.909,
-    words: ['lisbon', 'lisboa', 'cascais', 'sintra', 'estoril', 'setubal',
-            'setúbal', 'ericeira', 'obidos', 'óbidos', 'nazare', 'nazaré',
-            'evora', 'évora', 'fatima', 'fátima', 'peniche', 'sesimbra'] },
-  porto:  { base: 7.14, perKm: 1.401,
-    words: ['porto', 'oporto', 'matosinhos', 'gaia', 'braga', 'guimaraes',
-            'guimarães', 'aveiro', 'espinho', 'viana do castelo', 'povoa',
-            'póvoa', 'coimbra'] },
-  faro:   { base: 4.45, perKm: 1.116,
-    words: ['faro', 'albufeira', 'lagos', 'portimao', 'portimão', 'vilamoura',
-            'quarteira', 'tavira', 'sagres', 'carvoeiro', 'alvor', 'olhao',
-            'olhão', 'monte gordo', 'algarve', 'almancil', 'quinta do lago'] }
-};
 
-const PT_FALLBACK = { base: 11.61, perKm: 1.142 };
+
+
 
 /**
  * Espanha — estudo de 29/08/2026.
@@ -332,21 +318,11 @@ const PT_FALLBACK = { base: 11.61, perKm: 1.142 };
  *  - As classes grandes custam mais: eles cobram 3,39x e 3,80x onde
  *    nós cobrávamos 2,50x e 3,20x. Duas viaturas são duas viaturas.
  */
-const ES_ZONES = {
-  madrid: { base: 39.87, perKm: 1.3316, premium: 1.516,
-    van: 1.508, van_sedan: 3.737, two_vans: 4.189,
-    words: ['madrid', 'barajas', 'alcala', 'alcalá', 'toledo', 'segovia',
-            'aranjuez', 'avila', 'ávila', 'chinchon', 'chinchón'] },
-  barcelona: { base: 29.04, perKm: 1.3106, premium: 1.426,
-    van: 1.455, van_sedan: 3.605, two_vans: 4.041,
-    words: ['barcelona', 'prat', 'rambla', 'sitges', 'girona', 'lloret',
-            'tossa', 'andorra', 'figueres', 'tarragona', 'salou', 'reus'] }
-};
+
 
 /** Málaga: a tabela dela serve toda a Espanha que não seja Madrid nem
  *  Barcelona, incluindo a própria Málaga. */
-const ES_FALLBACK = { base: 39.76, perKm: 1.2843, premium: 1.530,
-  van: 1.484, van_sedan: 3.678, two_vans: 4.123 };
+
 
 /**
  * As cidades espanholas que não são Madrid nem Barcelona.
@@ -355,16 +331,7 @@ const ES_FALLBACK = { base: 39.76, perKm: 1.2843, premium: 1.530,
  * reconhecer que a rota é em Espanha quando o país não vem escrito
  * na morada, que é quase sempre.
  */
-const ES_WORDS = [
-  'malaga', 'málaga', 'torremolinos', 'marbella', 'nerja', 'granada',
-  'fuengirola', 'benalmadena', 'benalmádena', 'estepona', 'ronda', 'mijas',
-  'puerto banus', 'puerto banús', 'sevilla', 'seville', 'valencia', 'alicante',
-  'benidorm', 'torrevieja', 'murcia', 'palma', 'mallorca', 'ibiza', 'menorca',
-  'tenerife', 'gran canaria', 'las palmas', 'lanzarote', 'fuerteventura',
-  'bilbao', 'san sebastian', 'san sebastián', 'santander', 'vigo', 'coruna',
-  'coruña', 'santiago de compostela', 'zaragoza', 'almeria', 'almería',
-  'jerez', 'cadiz', 'cádiz', 'cordoba', 'córdoba', 'oviedo', 'gijon', 'gijón'
-];
+
 
 /**
  * Em Espanha cada zona tem os seus multiplicadores.
@@ -382,9 +349,7 @@ const ES_WORDS = [
  * destino de resort, procura alta. Uma fórmula não apanha isto, e
  * publicá-lo a metade do preço deles seria vender a perder.
  */
-const ES_ROUTE_PRICES = {
-  'barcelona|sitges': { sedan: 128.56, premium: 175.57 }
-};
+
 
 /**
  * Itália — estudo de 02/09/2026.
@@ -410,74 +375,7 @@ const ES_ROUTE_PRICES = {
  * premium contra 1,64 de Roma — 67% acima. Uma fórmula nacional
  * falharia por larga margem.
  */
-const IT_ZONES = {
-  /**
-   * Roma: 46,25 + 1,51/km, e não os 53,65 + 1,49 da regressão.
-   *
-   * A tabela deles em Roma NÃO é uma reta: o preço por km vai de
-   * 7,99 aos 8 km a 1,80 aos 234. Uma reta por mínimos quadrados
-   * ficava 2,7% ACIMA deles nas curtas, que é o oposto do que se
-   * quer.
-   *
-   * Esta é escolhida para nunca passar de -5%, custe o que custar
-   * nas médias — aos 34 km chega a -15%. É o preço de garantir que
-   * não somos mais caros em rota nenhuma.
-   */
-  rome: { base: 46.25, perKm: 1.5100,
-    premiumBase: 76.75, premiumKm: 1.9500,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['rome', 'roma', 'fiumicino', 'ciampino', 'ostia', 'civitavecchia',
-            'frascati', 'tivoli', 'anzio', 'castel gandolfo', 'orvieto',
-            'viterbo', 'latina'] },
 
-  bologna: { base: 65.03, perKm: 1.6083,
-    premiumBase: 85.25, premiumKm: 2.1050,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['bologna', 'bolonha', 'modena', 'ferrara', 'rimini', 'parma',
-            'ravenna', 'riccione', 'cesena', 'forli', 'forlì'] },
-
-  naples: { base: 58.96, perKm: 1.5028,
-    premiumBase: 81.25, premiumKm: 2.1300,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['naples', 'napoli', 'nápoles', 'pompeii', 'pompei', 'sorrento',
-            'salerno', 'amalfi', 'positano', 'ravello', 'caserta',
-            'herculaneum', 'ercolano', 'vesuvio'] },
-
-  palermo: { base: 43.24, perKm: 1.2041,
-    premiumBase: 71.75, premiumKm: 1.9800,
-    van: 1.586, van_sedan: 3.462, two_vans: 3.978,
-    words: ['palermo', 'cefalu', 'cefalù', 'trapani', 'agrigento', 'mondello',
-            'monreale', 'marsala', 'erice', 'sciacca'] },
-
-  // ---------- as quatro sem sedan do lado deles ----------
-
-  venice: { base: 58.93, perKm: 1.5475,
-    premiumBase: 71.50, premiumKm: 1.8550,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['venice', 'venezia', 'veneza', 'mestre', 'piazzale roma', 'padua',
-            'padova', 'verona', 'treviso', 'vicenza', 'lido di jesolo',
-            'jesolo'] },
-
-  florence: { base: 114.54, perKm: 2.3303,
-    premiumBase: 138.25, premiumKm: 2.7900,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['florence', 'firenze', 'florença', 'fiesole', 'siena', 'pisa',
-            'lucca', 'san gimignano', 'arezzo', 'chianti', 'montepulciano',
-            'cortona', 'volterra'] },
-
-  milan: { base: 64.86, perKm: 1.5628,
-    premiumBase: 89.25, premiumKm: 1.8150,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['milan', 'milano', 'milão', 'malpensa', 'linate', 'bergamo',
-            'como', 'lake como', 'lago di como', 'turin', 'torino', 'brescia',
-            'monza', 'varese', 'stresa', 'maggiore'] },
-
-  cagliari: { base: 38.97, perKm: 1.6212,
-    premiumBase: 46.75, premiumKm: 1.9500,
-    van: 1.304, van_sedan: 3.462, two_vans: 3.846,
-    words: ['cagliari', 'villasimius', 'chia', 'oristano', 'pula', 'costa rei',
-            'sardinia', 'sardegna', 'olbia', 'alghero', 'costa smeralda'] }
-};
 
 /**
  * Roma serve toda a Itália não medida.
@@ -486,9 +384,7 @@ const IT_ZONES = {
  * 30% mais barato. Abrir Bari, Catânia ou Lamezia com esta tabela
  * põe-nos acima do mercado — essas merecem estudo próprio.
  */
-const IT_FALLBACK = { base: 46.25, perKm: 1.5100,
-  premiumBase: 76.75, premiumKm: 1.9500,
-  van: 1.304, van_sedan: 3.462, two_vans: 3.846 };
+
 
 /**
  * Cidades italianas sem tabela própria.
@@ -496,65 +392,17 @@ const IT_FALLBACK = { base: 46.25, perKm: 1.5100,
  * Servem só para o site reconhecer que a rota é em Itália quando o
  * país não vem escrito na morada, que é quase sempre.
  */
-const IT_WORDS = [
-  'italy', 'italia', 'itália', 'genoa', 'genova', 'bari', 'catania',
-  'taormina', 'siracusa', 'syracuse', 'lamezia', 'tropea', 'brindisi',
-  'lecce', 'alberobello', 'matera', 'perugia', 'assisi', 'ancona',
-  'trieste', 'udine', 'bolzano', 'trento', 'garda', 'sirmione',
-  'cinque terre', 'la spezia', 'portofino', 'sanremo', 'capri', 'ischia',
-  'elba', 'livorno', 'grosseto', 'pescara'
-];
+
 
 /** A zona, pelo texto das moradas. Palavra inteira sempre: "aeroporto"
  *  contém "porto", e sem isso "Aeroporto de Faro" caía na zona do Porto. */
-function detectZone(zones, fallback, pickupText, dropoffText) {
-  for (const text of [pickupText, dropoffText]) {
-    const t = String(text || '').toLowerCase();
-    for (const z of Object.values(zones)) {
-      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return z;
-    }
-  }
-  return fallback;
-}
+
 
 /** Espanha ou Portugal, pelo texto das moradas. */
-function detectCountry(pickupText, dropoffText) {
-  const t = (String(pickupText || '') + ' ' + String(dropoffText || '')).toLowerCase();
 
-  if (/\b(spain|espa(n|ñ)a|espanha)\b/.test(t)) return 'ES';
-  if (/\b(portugal)\b/.test(t)) return 'PT';
-  if (/\b(italy|italia|itália)\b/.test(t)) return 'IT';
-
-  // Sem o país escrito, decide-se pelas cidades conhecidas.
-  //
-  // A Itália vem ANTES de Espanha por causa de nomes repetidos:
-  // Verona e Como existem nas duas listas de palavras, e Sardenha
-  // tem cidades com nome parecido a espanholas. Sem esta ordem, uma
-  // rota de Milão para Como caía na tabela de Barcelona.
-  for (const z of Object.values(IT_ZONES)) {
-    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'IT';
-  }
-  if (IT_WORDS.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'IT';
-
-  for (const z of Object.values(ES_ZONES)) {
-    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'ES';
-  }
-  if (ES_WORDS.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'ES';
-  for (const z of Object.values(PT_ZONES)) {
-    if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return 'PT';
-  }
-  return null;
-}
 
 /** Uma rota com preço combinado, se existir. */
-function routeOverride(zoneName, dropoffText) {
-  const t = String(dropoffText || '').toLowerCase();
-  for (const [key, price] of Object.entries(ES_ROUTE_PRICES)) {
-    const [zone, dest] = key.split('|');
-    if (zone === zoneName && new RegExp('\\b' + dest + '\\b').test(t)) return price;
-  }
-  return null;
-}
+
 
 /**
  * O suplemento noturno.
@@ -571,115 +419,14 @@ function routeOverride(zoneName, dropoffText) {
  * aterra às 23h é quase sempre uns minutos antes. Cortar às 23h
  * deixava de fora metade dos voos noturnos.
  */
-const NIGHT_FROM = 22 * 60 + 55;   // 22:55
-const NIGHT_TO = 6 * 60;           // 06:00
-const NIGHT_MULT = 1.2;
-
-export function isNightPickup(timeStr) {
-  if (!timeStr) return false;
-
-  const m = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
-  if (!m) return false;
-
-  const minutos = Number(m[1]) * 60 + Number(m[2]);
-
-  /**
-   * A janela atravessa a meia-noite.
-   *
-   * Das 22h55 às 23h59 E das 00h00 às 05h59. Escrito como um
-   * intervalo normal daria sempre falso.
-   */
-  return minutos >= NIGHT_FROM || minutos < NIGHT_TO;
-}
+   // 22:55
+           // 06:00
 
 
-export function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
-  const o = opts || {};
-  const vehicle = resolveVehicleClass(o.vehicleClass, passengers);
 
-  /**
-   * O suplemento aplica-se no fim, ao preço final.
-   *
-   * Aplicá-lo à base antes do multiplicador da viatura daria
-   * números diferentes conforme a classe — e um cliente que compare
-   * um sedan com uma van não deve encontrar percentagens
-   * diferentes.
-   */
-  const noite = isNightPickup(o.pickupTime) ? NIGHT_MULT : 1;
 
-  const country = detectCountry(o.pickupText, o.dropoffText) ||
-    (isPortugalRoute ? 'PT' : null);
 
-  if (country === 'ES') {
-    let zoneName = null;
-    for (const [name, z] of Object.entries(ES_ZONES)) {
-      const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
-      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
-    }
 
-    const zone = zoneName ? ES_ZONES[zoneName] : ES_FALLBACK;
-
-    // Rota com preço combinado ganha à fórmula.
-    const fixed = zoneName ? routeOverride(zoneName, o.dropoffText) : null;
-    if (fixed) {
-      if (vehicle.id === 'sedan') return fixed.sedan * noite;
-      if (vehicle.id === 'premium') return fixed.premium * noite;
-      return fixed.sedan * (zone[vehicle.id] || vehicle.mult) * noite;
-    }
-
-    const mult = vehicle.id === 'sedan' ? 1 : (zone[vehicle.id] || vehicle.mult);
-
-    return Math.max(24, (zone.base + distanceKm * zone.perKm) * mult * noite);
-  }
-
-  if (country === 'IT') {
-    let zoneName = null;
-    const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
-
-    for (const [name, z] of Object.entries(IT_ZONES)) {
-      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
-    }
-
-    const zone = zoneName ? IT_ZONES[zoneName] : IT_FALLBACK;
-    const sedan = zone.base + distanceKm * zone.perKm;
-
-    // O premium tem reta própria: o sedan e o premium deles não
-    // crescem ao mesmo ritmo, e um multiplicador falharia nas
-    // pontas.
-    if (vehicle.id === 'premium') {
-      return Math.max(24, (zone.premiumBase + distanceKm * zone.premiumKm) * noite);
-    }
-
-    if (vehicle.id === 'sedan') return Math.max(24, sedan * noite);
-
-    // As classes maiores continuam a sair do sedan.
-    return Math.max(24, sedan * (zone[vehicle.id] || vehicle.mult) * noite);
-  }
-
-  if (country === 'PT') {
-    const zone = detectZone(PT_ZONES, PT_FALLBACK, o.pickupText, o.dropoffText);
-    return Math.max(24, (zone.base + distanceKm * zone.perKm) * vehicle.mult * noite);
-  }
-
-  // Sem país estudado, a fórmula antiga.
-  /**
-   * Sem país estudado.
-   *
-   * Eram 3,50 por quilómetro vezes 1,3 — três a quatro vezes mais
-   * do que as tarifas reais de Espanha e Portugal. Um transfer de
-   * 300 km saía a 2365 euros.
-   *
-   * Ninguém reparou porque as rotas que vendemos têm todas país
-   * definido. Mas o mapa abriu para 129 países, e agora esta
-   * fórmula é a que responde à maioria deles.
-   *
-   * Os números novos são a média das tarifas espanhola e
-   * portuguesa: 35 de base e 1,45 por quilómetro. Dá 30 euros aos
-   * 20 km e 470 aos 300 — no meio das duas, que é onde deve estar
-   * um país que ainda não estudámos.
-   */
-  return Math.max(25, (35 + distanceKm * 1.45) * vehicle.mult * noite);
-}
 
 /**
  * Servimos aqui?
@@ -2205,6 +1952,7 @@ app.post('/api/payment-options', async (req, res) => {
     const agent = await getApprovedAgent(requester);
 
     let distanceKm = Number(booking.distance_km) || 0;
+
     if (!distanceKm && booking.pickup && booking.dropoff) {
       try {
         ({ distanceKm } = await getDistanceAndDuration(booking.pickup, booking.dropoff));
@@ -2343,6 +2091,83 @@ app.post('/register', async (req, res) => {
  * Pública: é a primeira coisa que acontece numa reserva, muito
  * antes de haver sessão.
  */
+/**
+ * ---------------------------------------------------------------
+ * O PREÇO, CALCULADO NUM SÍTIO SÓ
+ *
+ * O site tinha uma cópia da fórmula. Duas cópias são duas
+ * verdades: mudei a do servidor e a do browser ficou para trás, e
+ * um cliente viu 87 euros na calculadora e 30 no checkout.
+ *
+ * Isto acaba com o problema pela raiz. A calculadora pergunta, o
+ * servidor responde, e há uma fórmula só.
+ *
+ * Custa um pedido de rede por cotação. Vale a pena: um preço
+ * errado custa a reserva inteira.
+ * ---------------------------------------------------------------
+ */
+app.get('/api/price', async (req, res) => {
+  if (limitar('price', req, res, { max: 40, segundos: 60 })) return;
+
+  try {
+    const km = Number(req.query.km);
+    const pax = Number(req.query.pax) || 1;
+
+    if (!Number.isFinite(km) || km < 0) {
+      return res.status(400).json({ error: 'Send km.', field_error: true });
+    }
+
+    const de = String(req.query.from || '');
+    const para = String(req.query.to || '');
+
+    /**
+     * O país fora da lista responde primeiro.
+     *
+     * Não vale a pena calcular um preço para um sítio onde não
+     * operamos — e devolver preço E recusa ao mesmo tempo confunde
+     * o site.
+     */
+    const foraDe = await paisForaDaLista(de);
+    const foraPara = await paisForaDaLista(para);
+
+    if (foraDe || foraPara) {
+      return res.json({
+        covered: false,
+        blocked_country: foraDe || foraPara,
+        message: `We are not operating in ${foraDe || foraPara} yet. ` +
+                 'Write to us and we will tell you when we are.'
+      });
+    }
+
+    /**
+     * O isPortugalRoute vem do texto, como no checkout.
+     *
+     * Não é uma escolha do browser: se fosse, alguém podia pedir
+     * o preço português para uma rota espanhola.
+     */
+    const ptRota = /portugal|lisbon|lisboa|porto|faro|algarve|madeira|funchal|azores|açores/i
+      .test(de + ' ' + para);
+
+    const price = computePriceEUR(km, pax, ptRota, {
+      vehicleClass: req.query.vehicle || null,
+      pickupText: de,
+      dropoffText: para,
+      pickupTime: req.query.time || null
+    });
+
+    return res.json({
+      covered: true,
+      price_eur: Math.round(price * 100) / 100,
+      night_surcharge: isNightPickup(req.query.time || null),
+      vehicle: resolveVehicleClass(req.query.vehicle || null, pax)?.id || null
+    });
+  } catch (error) {
+    console.error('price:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 app.get('/api/coverage', async (req, res) => {
   if (limitar('coverage', req, res, { max: 30, segundos: 60 })) return;
 
@@ -2664,6 +2489,58 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   /**
+   * Sem distância, não se cobra.
+   *
+   * O Google devolveu uma rota mas com zero quilómetros — ou
+   * devolveu uma rota diferente da que o cliente viu.
+   *
+   * Zero quilómetros dá o preço mínimo: 24 euros para uma viagem
+   * de 75. E ninguém repara, porque o número sai bonito.
+   *
+   * Preferir um erro a uma cobrança errada: a reserva repete-se, o
+   * preço já cobrado não se desfaz sem estragar a confiança.
+   */
+  if (!distanceKm || distanceKm <= 0) {
+    console.error('checkout with no distance:',
+      booking.pickup, '->', booking.dropoff);
+
+    telegramTaskFailed('checkout',
+      `No distance for ${booking.pickup} -> ${booking.dropoff}. ` +
+      'The booking was refused instead of charged at the minimum.'
+    ).catch(() => {});
+
+    return res.status(400).json({
+      error: 'We could not measure that route. ' +
+             'Try again, or write to us and we will price it by hand.'
+    });
+  }
+
+  /**
+   * E a distância que o cliente viu manda.
+   *
+   * O Google pode devolver uma rota diferente da que a
+   * calculadora usou — outro caminho, outro trânsito, outra
+   * paragem. Uma diferença de dez por cento é normal; uma de
+   * cinquenta significa que o cliente viu um preço e vai pagar
+   * outro.
+   *
+   * Quando o site envia a distância, é essa que conta. É a que
+   * está no preço que ele aceitou.
+   */
+  const kmDoCliente = Number(booking.distance_km) || 0;
+
+  if (kmDoCliente > 0) {
+    const desvio = Math.abs(kmDoCliente - distanceKm) / distanceKm;
+
+    if (desvio > 0.25) {
+      console.warn('distance mismatch:', kmDoCliente, 'vs', distanceKm,
+        booking.pickup, '->', booking.dropoff);
+    }
+
+    distanceKm = kmDoCliente;
+  }
+
+  /**
    * A última verificação, antes de cobrar.
    *
    * A calculadora já perguntou, mas o browser pode mentir — e uma
@@ -2702,6 +2579,49 @@ app.post('/api/create-checkout-session', async (req, res) => {
       pickupTime: booking.booking_time || booking.time
     }
   );
+
+  /**
+   * O que entrou no cálculo, escrito no registo.
+   *
+   * Um preço errado não deixa rasto: sai um número bonito e
+   * ninguém sabe de onde veio. Estas quatro linhas dizem-no.
+   *
+   * Sem isto, um cliente que veja 75 na calculadora e 24 no
+   * checkout obriga a adivinhar — e adivinhei três vezes hoje.
+   */
+  console.log('[price]',
+    booking.pickup, '->', booking.dropoff,
+    '| km:', distanceKm,
+    '| km do cliente:', booking.distance_km,
+    '| pax:', passengers,
+    '| pt:', isPortugalRoute,
+    '| classe:', booking.vehicle_class || 'auto',
+    '| hora:', booking.booking_time || booking.time,
+    '=> EUR', priceEUR.toFixed(2));
+
+  /**
+   * E se divergir do que o cliente viu, avisa.
+   *
+   * O site envia o preço que mostrou. Se o servidor chegar a
+   * outro, um dos dois está errado — e é melhor saber agora do
+   * que pelo cliente.
+   */
+  const vistoPeloCliente = Number(booking.price_eur) || 0;
+
+  if (vistoPeloCliente > 0) {
+    const desvioPreco = Math.abs(vistoPeloCliente - priceEUR) / priceEUR;
+
+    if (desvioPreco > 0.05) {
+      console.error('[price] MISMATCH: cliente viu', vistoPeloCliente,
+        'servidor calculou', priceEUR.toFixed(2));
+
+      telegramTaskFailed('price mismatch',
+        `${booking.pickup} -> ${booking.dropoff}\n` +
+        `Client saw ${vistoPeloCliente} EUR, server calculated ` +
+        `${priceEUR.toFixed(2)} EUR (${distanceKm.toFixed(1)} km)`
+      ).catch(() => {});
+    }
+  }
 
   /**
    * Se foi de noite.
