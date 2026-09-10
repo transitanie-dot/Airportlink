@@ -2230,7 +2230,41 @@ app.get('/api/coverage', async (req, res) => {
 
 
 
-app.post('/api/create-checkout-session', async (req, res) => {
+/**
+ * Uma rede de segurança à volta de toda a rota.
+ *
+ * Quinze pontos desta função podem lançar — chamadas à base, ao
+ * Google, ao Stripe, e leituras de campos que podem não existir.
+ *
+ * Quando uma delas rebenta fora de um try, o Express devolve a
+ * página de erro por omissão. Essa resposta NÃO leva os
+ * cabeçalhos de CORS, e o browser mostra "Failed to fetch" — que
+ * não diz nada sobre a causa real.
+ *
+ * Com isto, qualquer falha devolve JSON com CORS. O cliente vê a
+ * mensagem, e o registo do servidor tem o rasto.
+ */
+app.post('/api/create-checkout-session', async (req, res, next) => {
+  try {
+    await criarSessaoCheckout(req, res);
+  } catch (error) {
+    console.error('[checkout] falha não tratada:', error);
+
+    telegramTaskFailed('checkout',
+      `${error.message}\n${(error.stack || '').split('\n')[1] || ''}`
+    ).catch(() => {});
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: 'Something went wrong on our side. ' +
+               'Try again, or write to us and we will book it by hand.'
+      });
+    }
+  }
+});
+
+
+async function criarSessaoCheckout(req, res) {
   /**
    * Oito por minuto.
    *
@@ -2967,7 +3001,7 @@ for (const chave of Object.keys(metadata)) {
       error: error.message
     });
   }
-});
+}
 
 /**
  * Completa uma reserva a partir da sessão do Stripe.
@@ -6897,6 +6931,47 @@ app.post('/api/tasks/charge-due', async (req, res) => {
     return res.status(500).json({ error: 'Charge run failed.', ...results });
   }
 });
+
+/**
+ * O último apanhador, depois de todas as rotas.
+ *
+ * Um erro que escape a uma rota chega aqui. Sem isto, o Express
+ * responde com a página de erro por omissão — HTML, sem
+ * cabeçalhos de CORS — e o browser mostra "Failed to fetch", que
+ * não diz nada sobre a causa.
+ *
+ * Isto aconteceu no checkout: quinze pontos da função podiam
+ * lançar fora de um try, e qualquer um deles dava um erro de CORS
+ * que parecia um problema de configuração.
+ */
+app.use((err, req, res, next) => {
+  console.error('[erro não tratado]', req.method, req.path, err);
+
+  telegramTaskFailed(`${req.method} ${req.path}`,
+    `Unhandled: ${err.message}`
+  ).catch(() => {});
+
+  if (res.headersSent) return next(err);
+
+  /**
+   * Os cabeçalhos de CORS, à mão.
+   *
+   * O middleware do cors() já correu quando um erro chega aqui, e
+   * a resposta de erro sai sem eles. Repô-los é a diferença entre
+   * o cliente ver a mensagem e ver "Failed to fetch".
+   */
+  const origin = req.headers.origin;
+
+  if (origin && originAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
+  return res.status(500).json({
+    error: 'Something went wrong on our side. Please try again.'
+  });
+});
+
 
 app.listen(PORT, async () => {
   // Uma leitura qualquer confirma que a chave é a certa. Mais vale
