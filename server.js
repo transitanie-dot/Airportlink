@@ -2800,6 +2800,27 @@ app.post('/api/create-checkout-session', async (req, res) => {
       : ''
   };
 
+/**
+ * Os metadados, dentro dos limites do Stripe.
+ *
+ * O Stripe recusa a sessão INTEIRA se um valor passar dos 500
+ * caracteres — e não diz qual. Uma nota longa de um cliente, uma
+ * morada com muitos detalhes, e ninguém consegue pagar.
+ *
+ * Cortar aqui é uma linha; descobrir a causa em produção é uma
+ * tarde.
+ */
+for (const chave of Object.keys(metadata)) {
+  const v = metadata[chave];
+
+  if (v === null || v === undefined) {
+    delete metadata[chave];
+    continue;
+  }
+
+  metadata[chave] = String(v).slice(0, 490);
+}
+
   // O cliente pediu pagar depois? Só se as regras deixarem. A
   // decisão é tomada AQUI, não no browser: um pedido forjado com
   // payment_mode 'later' cai na mesma nesta verificação.
