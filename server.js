@@ -15,7 +15,11 @@ import {
   telegramDaySummary,
   // As tarefas automáticas avisam quando falham, e quando voltam.
   telegramTaskFailed,
-  telegramTaskRecovered
+  telegramTaskRecovered,
+
+  // Uma agência que se candidata, e uma conta de cliente nova.
+  telegramNewAgency,
+  telegramNewAccount
 } from './telegram.js';
 
 /**
@@ -2208,6 +2212,20 @@ app.post('/register', async (req, res) => {
     // conta continua boa — o email é um extra, não um requisito.
     await sendVerification(email, name, 'customer');
 
+    /**
+     * E o canal de vendas, em silêncio.
+     *
+     * Uma conta nova é alguém que pode vir a reservar, e o número
+     * por semana diz se o site está a converter. Silenciosa
+     * porque, num dia bom, são muitas — e muitos apitos ensinam a
+     * ignorar o canal.
+     */
+    telegramNewAccount({
+      full_name: name,
+      email: email,
+      source: 'website'
+    }).catch(() => {});
+
     return res.json({ success: true });
   } catch (error) {
     console.error('Register error:', error);
@@ -3567,6 +3585,22 @@ app.post('/api/agent/apply', async (req, res) => {
       });
 
     if (error) throw error;
+
+    /**
+     * O canal de vendas, com apito.
+     *
+     * Uma agência aprovada traz dezenas de reservas por mês. É o
+     * único registo que justifica interromper alguém — e a
+     * candidatura chegava em silêncio, para uma tabela que só se
+     * vê no painel.
+     */
+    telegramNewAgency({
+      agency_name: agency_name || legal_name,
+      email: user.email,
+      country: agency_country,
+      phone: agency_phone,
+      website: agency_website
+    }).catch(() => {});
 
     return res.json({ success: true, status: 'pending' });
   } catch (error) {
