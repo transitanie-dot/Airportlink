@@ -1596,6 +1596,21 @@ app.post('/api/admin/ride-driver', async (req, res) => {
         });
       }
 
+      /**
+       * E o número tem de marcar.
+       *
+       * Verificava-se que existia. Um agente com pressa escreve
+       * "ver no whatsapp" e o campo passa — mas é este o número
+       * que vai no SMS ao cliente, e quem o marca é alguém sozinho
+       * num aeroporto à noite.
+       */
+      if (String(driver.phone).replace(/\D/g, '').length < 6) {
+        return res.status(400).json({
+          error: 'That phone number is too short. ' +
+                 'The passenger calls it on the day.'
+        });
+      }
+
       await supabase.from('bookings').update({
         manual_driver_name: driver.name,
         manual_driver_phone: driver.phone,
