@@ -1248,6 +1248,27 @@ app.use((req, res, next) => {
        */
       const critico = /checkout|payment|charge|booking|refund|webhook/.test(req.path);
 
+      /**
+       * As rotas que batem sozinhas não alarmam.
+       *
+       * Quando o Render adormece, a primeira chamada de cada uma
+       * dá 504 — e o canal enchia-se de avisos sobre uma coisa que
+       * se resolve ao acordar.
+       */
+      const bateSozinha = /\/(presence|tick|health|ping|heartbeat|rates)/.test(req.path);
+
+      /**
+       * E o 5xx do proxy é do proxy.
+       *
+       * Um 502 ou 504 é o Render a acordar ou a rede a falhar. O
+       * código nem chegou a correr.
+       */
+      const daInfraestrutura = codigo === 502 || codigo === 503 || codigo === 504;
+
+      if (bateSozinha || daInfraestrutura) {
+        return jsonOriginal(body);
+      }
+
       if (codigo >= 500 || (codigo === 400 && critico)) {
         telegramTaskFailed(
           `${req.method} ${req.path}`,
