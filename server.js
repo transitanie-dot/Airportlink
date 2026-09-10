@@ -64,6 +64,7 @@ import {
   sendRideChanged,
   sendTicketReply,
   sendDeletionConfirm,
+  sendPasswordChanged,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -1273,6 +1274,33 @@ app.use((req, res, next) => {
         return jsonOriginal(body);
       }
 
+      /**
+       * Um 400 de validação não é um erro nosso.
+       *
+       * Alguém tentou reservar sem escolher data e o servidor
+       * recusou — que é exatamente o que ele deve fazer. Avisar
+       * sobre isso é avisar que o código funciona.
+       *
+       * O que interessa saber é quando uma reserva VÁLIDA falha:
+       * o Stripe em baixo, a base a recusar, o Google sem quota.
+       * Esses são 500.
+       */
+      /**
+       * A resposta diz se é validação.
+       *
+       * Comparar o texto da mensagem funcionava até alguém mudar
+       * uma palavra — e depois o canal enchia-se outra vez, sem
+       * ninguém perceber porquê.
+       *
+       * Um campo na resposta é explícito: quem escreve a
+       * validação decide, e não há regex a adivinhar.
+       */
+      const validacao = codigo === 400 && body?.field_error === true;
+
+      if (validacao) {
+        return jsonOriginal(body);
+      }
+
       if (codigo >= 500 || (codigo === 400 && critico)) {
         telegramTaskFailed(
           `${req.method} ${req.path}`,
@@ -1632,7 +1660,8 @@ app.post('/api/admin/ride-driver', async (req, res) => {
       if (String(driver.phone).replace(/\D/g, '').length < 6) {
         return res.status(400).json({
           error: 'That phone number is too short. ' +
-                 'The passenger calls it on the day.'
+                 'The passenger calls it on the day.',
+          field_error: true
         });
       }
 
@@ -2350,7 +2379,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
   if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) {
     return res.status(400).json({
       error: 'That email address does not look right. ' +
-             'Check it — the confirmation goes there.'
+             'Check it — the confirmation goes there.',
+      field_error: true
     });
   }
 
@@ -2364,19 +2394,19 @@ app.post('/api/create-checkout-session', async (req, res) => {
   const dataStr = String(booking.booking_date || '');
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dataStr)) {
-    return res.status(400).json({ error: 'Pick a travel date.' });
+    return res.status(400).json({ error: 'Pick a travel date.', field_error: true });
   }
 
   const horaStr = String(booking.booking_time || '');
 
   if (!/^\d{2}:\d{2}$/.test(horaStr)) {
-    return res.status(400).json({ error: 'Pick a pick-up time.' });
+    return res.status(400).json({ error: 'Pick a pick-up time.', field_error: true });
   }
 
   const quando = new Date(`${dataStr}T${horaStr}:00`);
 
   if (Number.isNaN(quando.getTime())) {
-    return res.status(400).json({ error: 'That date and time are not valid.' });
+    return res.status(400).json({ error: 'That date and time are not valid.', field_error: true });
   }
 
   /**
@@ -2393,7 +2423,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
   if (quando.getTime() < agora + MARGEM_HORAS * 3600000) {
     return res.status(400).json({
       error: 'We need at least two hours to arrange a driver. ' +
-             'Pick a later time, or call us if it is urgent.'
+             'Pick a later time, or call us if it is urgent.',
+      field_error: true
     });
   }
 
@@ -2406,7 +2437,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
    */
   if (quando.getTime() > agora + 730 * 86400000) {
     return res.status(400).json({
-      error: 'That date is too far ahead. Check the year.'
+      error: 'That date is too far ahead. Check the year.',
+      field_error: true
     });
   }
 
@@ -2422,7 +2454,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
   if (!Number.isInteger(pax) || pax < 1 || pax > 16) {
     return res.status(400).json({
       error: 'Passengers must be between 1 and 16. ' +
-             'For a larger group, write to us and we will arrange it.'
+             'For a larger group, write to us and we will arrange it.',
+      field_error: true
     });
   }
 
@@ -2439,7 +2472,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
     if (String(valor).trim().length < 4) {
       return res.status(400).json({
         error: `The ${campo === 'pickup' ? 'pick-up' : 'drop-off'} ` +
-               'address is too short. Pick one from the suggestions.'
+               'address is too short. Pick one from the suggestions.',
+        field_error: true
       });
     }
   }
@@ -2456,7 +2490,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     const classes = ['sedan', 'van', 'premium', 'minibus'];
 
     if (!classes.includes(String(booking.vehicle_class).toLowerCase())) {
-      return res.status(400).json({ error: 'Unknown vehicle class.' });
+      return res.status(400).json({ error: 'Unknown vehicle class.', field_error: true });
     }
   }
 
@@ -2473,7 +2507,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
     if (!/^[A-Z0-9]{2,3}\s?\d{1,4}[A-Z]?$/.test(voo)) {
       return res.status(400).json({
-        error: 'That flight number does not look right. Example: TP1234.'
+        error: 'That flight number does not look right. Example: TP1234.',
+        field_error: true
       });
     }
 
@@ -2490,7 +2525,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   if (nome.length < 2) {
     return res.status(400).json({
-      error: 'A name is needed — the driver holds a sign with it.'
+      error: 'A name is needed — the driver holds a sign with it.',
+      field_error: true
     });
   }
 
@@ -2527,7 +2563,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
   if (digitos.length < 6) {
     return res.status(400).json({
-      error: 'A phone number is needed. The driver uses it to reach you on the day.'
+      error: 'A phone number is needed. The driver uses it to reach you on the day.',
+      field_error: true
     });
   }
 
@@ -5025,18 +5062,18 @@ app.post('/api/booking/change', async (req, res) => {
   }
 
   if (!Object.keys(changes).length) {
-    return res.status(400).json({ error: 'Nothing that can be changed.' });
+    return res.status(400).json({ error: 'Nothing that can be changed.', field_error: true });
   }
 
   if (changes.booking_date !== undefined) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(changes.booking_date))) {
-      return res.status(400).json({ error: 'That date is not valid.' });
+      return res.status(400).json({ error: 'That date is not valid.', field_error: true });
     }
   }
 
   if (changes.booking_time !== undefined) {
     if (!/^\d{2}:\d{2}$/.test(String(changes.booking_time))) {
-      return res.status(400).json({ error: 'That time is not valid.' });
+      return res.status(400).json({ error: 'That time is not valid.', field_error: true });
     }
   }
 
@@ -5081,7 +5118,7 @@ app.post('/api/booking/change', async (req, res) => {
   for (const campo of ['pickup', 'dropoff']) {
     if (changes[campo] !== undefined &&
         String(changes[campo]).trim().length < 4) {
-      return res.status(400).json({ error: 'That address is too short.' });
+      return res.status(400).json({ error: 'That address is too short.', field_error: true });
     }
   }
 
@@ -5105,7 +5142,8 @@ app.post('/api/booking/change', async (req, res) => {
   if (changes.passenger_name !== undefined &&
       String(changes.passenger_name).trim().length < 2) {
     return res.status(400).json({
-      error: 'The passenger name is too short — the driver holds a sign with it.'
+      error: 'The passenger name is too short — the driver holds a sign with it.',
+      field_error: true
     });
   }
 
@@ -6114,6 +6152,106 @@ app.post('/api/client-error', async (req, res) => {
      */
     console.error('client-error:', error.message);
     return res.json({ ok: true });
+  }
+});
+
+
+/**
+ * ---------------------------------------------------------------
+ * MUDAR A PALAVRA-PASSE
+ *
+ * A conta existia e não se geria. Quem quisesse mudar tinha de
+ * fingir que se tinha esquecido — sair, pedir o email de
+ * recuperação, esperar, clicar.
+ *
+ * Serve os quatro: clientes, agências, parceiros e agentes. É a
+ * mesma tabela de utilizadores por trás dos quatro portais.
+ * ---------------------------------------------------------------
+ */
+app.post('/api/account/password', async (req, res) => {
+  if (limitar('password', req, res, { max: 5, segundos: 900 })) return;
+
+  try {
+    const user = await getUserFromRequest(req);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Sign in first.' });
+    }
+
+    const { current_password, new_password } = req.body || {};
+
+    if (!new_password || String(new_password).length < 8) {
+      return res.status(400).json({
+        error: 'The new password needs at least 8 characters.',
+        field_error: true
+      });
+    }
+
+    /**
+     * A atual é obrigatória.
+     *
+     * Sem ela, quem apanhasse um portátil desbloqueado mudava a
+     * palavra-passe e ficava com a conta. Com ela, precisa de
+     * saber a antiga — que é o ponto.
+     */
+    if (!current_password) {
+      return res.status(400).json({
+        error: 'Enter your current password.',
+        field_error: true
+      });
+    }
+
+    /**
+     * Confirmar a antiga tentando entrar com ela.
+     *
+     * O Supabase não tem uma forma de "verificar esta password".
+     * Um signIn com as credenciais é o que existe — e falha se
+     * estiver errada, que é o que queremos saber.
+     */
+    const { error: erroLogin } = await supabase.auth.signInWithPassword({
+      email: user.email,
+      password: String(current_password)
+    });
+
+    if (erroLogin) {
+      return res.status(400).json({
+        error: 'That is not your current password.',
+        field_error: true
+      });
+    }
+
+    if (String(new_password) === String(current_password)) {
+      return res.status(400).json({
+        error: 'The new password is the same as the current one.',
+        field_error: true
+      });
+    }
+
+    const { error } = await supabase.auth.admin.updateUserById(user.id, {
+      password: String(new_password)
+    });
+
+    if (error) throw error;
+
+    console.log('[account] password changed:', user.email);
+
+    /**
+     * E um email a avisar.
+     *
+     * Se não foi ele, é assim que fica a saber — e ainda vai a
+     * tempo de recuperar a conta. Uma mudança de password em
+     * silêncio é a última coisa que um dono de conta quer.
+     */
+    sendPasswordChanged(user.email).catch((e) =>
+      console.error('password email:', e.message));
+
+    return res.json({
+      success: true,
+      message: 'Password changed. Your other devices stay signed in.'
+    });
+  } catch (error) {
+    console.error('password change:', error.message);
+    return res.status(500).json({ error: error.message });
   }
 });
 
