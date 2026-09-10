@@ -4924,6 +4924,23 @@ app.post('/api/booking/change', async (req, res) => {
   const SO_ESTES = ['booking_date', 'booking_time', 'passengers',
                     'pickup', 'dropoff', 'flight_number', 'notes'];
 
+  /**
+   * E os dados do passageiro, só para agências.
+   *
+   * Quem reserva para si próprio tem o telefone no perfil — é lá
+   * que se muda, e serve para todas as reservas.
+   *
+   * Uma agência é diferente: o passageiro não é ela. Mudar de
+   * passageiro numa reserva é uma coisa que acontece — o cliente
+   * dela cancela e outro vai no lugar — e o motorista precisa de
+   * saber quem espera.
+   */
+  const agente = await getApprovedAgent(user).catch(() => null);
+
+  if (agente) {
+    SO_ESTES.push('passenger_name', 'passenger_phone');
+  }
+
   for (const k of Object.keys(changes)) {
     if (!SO_ESTES.includes(k)) {
       /**
@@ -4996,6 +5013,30 @@ app.post('/api/booking/change', async (req, res) => {
         String(changes[campo]).trim().length < 4) {
       return res.status(400).json({ error: 'That address is too short.' });
     }
+  }
+
+  /**
+   * O telefone do passageiro, com a mesma regra da criação.
+   *
+   * Seis dígitos. É o número que o motorista marca no dia — um
+   * campo com três dígitos é pior do que um vazio, porque parece
+   * preenchido.
+   */
+  if (changes.passenger_phone !== undefined) {
+    const digitos = String(changes.passenger_phone).replace(/\D/g, '');
+
+    if (digitos.length < 6) {
+      return res.status(400).json({
+        error: 'That phone number is too short. The driver calls it on the day.'
+      });
+    }
+  }
+
+  if (changes.passenger_name !== undefined &&
+      String(changes.passenger_name).trim().length < 2) {
+    return res.status(400).json({
+      error: 'The passenger name is too short — the driver holds a sign with it.'
+    });
   }
 
   if (changes.flight_number) {
