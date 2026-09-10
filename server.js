@@ -2286,13 +2286,23 @@ app.post('/api/create-checkout-session', async (req, res) => {
    * no calendário e ninguém a podia fazer. E uma para 2031 ocupava
    * a agenda para sempre.
    */
-  const dataStr = String(booking.booking_date || '');
+  /**
+   * A data, com os dois nomes.
+   *
+   * A homepage manda "date", a página de checkout manda "date", e
+   * o servidor lia "booking_date". Nenhuma das duas passava.
+   *
+   * Aceitar os dois é mais robusto do que escolher um: as páginas
+   * evoluíram em alturas diferentes e nem todas foram
+   * atualizadas ao mesmo tempo.
+   */
+  const dataStr = String(booking.booking_date || booking.date || '');
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dataStr)) {
     return res.status(400).json({ error: 'Pick a travel date.', field_error: true });
   }
 
-  const horaStr = String(booking.booking_time || '');
+  const horaStr = String(booking.booking_time || booking.time || '');
 
   if (!/^\d{2}:\d{2}$/.test(horaStr)) {
     return res.status(400).json({ error: 'Pick a pick-up time.', field_error: true });
