@@ -315,22 +315,23 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
 
   // Sem país estudado, a fórmula antiga.
   /**
-   * Sem país estudado.
+   * O resto do mundo.
    *
-   * Eram 3,50 por quilómetro vezes 1,3 — três a quatro vezes mais
-   * do que as tarifas reais de Espanha e Portugal. Um transfer de
-   * 300 km saía a 2365 euros.
+   * Só Portugal, Espanha e Itália têm tarifas próprias. Todos os
+   * outros países usam esta fórmula, e é a que sempre usaram.
    *
-   * Ninguém reparou porque as rotas que vendemos têm todas país
-   * definido. Mas o mapa abriu para 129 países, e agora esta
-   * fórmula é a que responde à maioria deles.
+   * NÃO MEXER SEM PERGUNTAR.
    *
-   * Os números novos são a média das tarifas espanhola e
-   * portuguesa: 35 de base e 1,45 por quilómetro. Dá 30 euros aos
-   * 20 km e 470 aos 300 — no meio das duas, que é onde deve estar
-   * um país que ainda não estudámos.
+   * Mudei-a numa manhã porque um teste que escrevi marcou 2365
+   * euros numa viagem de 300 km. O número era alto, mas era o
+   * preço a sério — e a alteração baixou Dublin de 80 para 47
+   * euros sem ninguém pedir.
+   *
+   * Um preço não é um bug só porque parece caro. Trezentos
+   * quilómetros são cinco horas de carro, ida e volta para o
+   * motorista.
    */
-  return Math.max(25, (35 + distanceKm * 1.45) * vehicle.mult * noite);
+  return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult * noite);
 }
 
 
