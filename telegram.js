@@ -351,7 +351,7 @@ export async function telegramNewBooking(booking, assignment) {
 
   if (ref) linhas.push('', `\`${esc(ref)}\``);
 
-  return send(SALES, linhas.join('\n'), { silent: true });
+  return send(SALES, linhas.join('\n'), { silent: false });
 }
 
 
@@ -637,7 +637,101 @@ export async function telegramNewPartner(partner) {
     esc(partner.trading_name || partner.legal_name),
     esc(partner.country || ''),
     esc(partner.email || '')
-  ].join('\n'), { silent: true });
+  ].join('\n'), { silent: false });
+}
+
+
+/**
+ * Uma conversa de apoio nova.
+ *
+ * Vai para o canal de alarmes, não para o de vendas: alguém está à
+ * espera de resposta, e isso é uma coisa a fazer, não uma coisa
+ * boa que aconteceu.
+ *
+ * Silenciosa de propósito. Num dia com trinta conversas, trinta
+ * apitos ensinam a ignorar o canal — e o que se quer é que os
+ * apitos a sério continuem a valer alguma coisa.
+ */
+export async function telegramNewChat(chat) {
+  const quem = {
+    customer: '👤 Customer',
+    agency: '🏢 Travel agent',
+    partner: '🚗 Driver partner'
+  }[chat.audience || 'customer'] || '👤 Customer';
+
+  /**
+   * O básico: quem, e a referência.
+   *
+   * O assunto e a primeira mensagem ficam no painel — é lá que se
+   * responde, e ler a conversa no Telegram convida a decidir sem
+   * ver o resto.
+   *
+   * O que a mensagem tem de fazer é uma coisa só: dizer que há
+   * alguém à espera.
+   */
+  const linhas = [
+    '💬 *New support ticket*',
+    '',
+    `${quem} · ${esc(chat.name || chat.email || 'no name')}`
+  ];
+
+  if (chat.ticket) {
+    linhas.push('', `_${esc(chat.ticket)}_`);
+  }
+
+  return send(ALERTS, linhas.join('\n'), { silent: false });
+}
+
+
+/**
+ * Uma conta de cliente nova.
+ *
+ * Para o canal de vendas: é alguém que pode vir a reservar, e o
+ * número de contas por semana diz se o site está a converter.
+ */
+export async function telegramNewAccount(conta) {
+  return send(SALES, [
+    '✨ *New customer account*',
+    '',
+    esc(conta.full_name || conta.email || 'no name'),
+    esc(conta.email || ''),
+
+    /**
+     * De onde veio, quando sabemos.
+     *
+     * Uma conta criada no checkout é diferente de uma criada do
+     * nada — a primeira quase de certeza vai reservar.
+     */
+    conta.source ? '' : null,
+    conta.source ? esc('via ' + conta.source) : null
+  ].filter((l) => l !== null).join('\n'), { silent: false });
+}
+
+
+/**
+ * Uma agência candidatou-se.
+ *
+ * Vale mais do que uma conta de cliente: uma agência aprovada traz
+ * dezenas de reservas por mês.
+ *
+ * Esta apita. É o único registo que justifica interromper alguém.
+ */
+export async function telegramNewAgency(agencia) {
+  const linhas = [
+    '🏢 *New travel agent application*',
+    '',
+    `*${esc(agencia.agency_name || agencia.company_name || 'no name')}*`,
+    esc(agencia.email || '')
+  ];
+
+  if (agencia.country) linhas.push(esc(agencia.country));
+  if (agencia.phone) linhas.push(esc(agencia.phone));
+
+  if (agencia.website) {
+    linhas.push('', esc(agencia.website));
+  }
+
+  return send(SALES, linhas.join('\n'), { silent: false });
 }
 
 
