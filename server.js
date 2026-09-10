@@ -2140,13 +2140,19 @@ app.get('/api/price', async (req, res) => {
     }
 
     /**
-     * O isPortugalRoute vem do texto, como no checkout.
+     * A regra do checkout, exatamente.
      *
-     * Não é uma escolha do browser: se fosse, alguém podia pedir
-     * o preço português para uma rota espanhola.
+     * O checkout usa o getDistanceAndDuration, que devolve
+     * isPortugalRoute quando AS DUAS moradas dizem "portugal" — é
+     * o que o Google escreve no fim da morada formatada.
+     *
+     * Eu tinha escrito outra regra aqui: qualquer menção a Lisboa,
+     * Porto ou Faro em qualquer dos lados. Duas regras diferentes
+     * para a mesma decisão dão dois preços diferentes.
      */
-    const ptRota = /portugal|lisbon|lisboa|porto|faro|algarve|madeira|funchal|azores|açores/i
-      .test(de + ' ' + para);
+    const ptRota =
+      de.toLowerCase().includes('portugal') &&
+      para.toLowerCase().includes('portugal');
 
     const price = computePriceEUR(km, pax, ptRota, {
       vehicleClass: req.query.vehicle || null,
