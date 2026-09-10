@@ -1230,6 +1230,62 @@ export async function sendTicketReply(chat, mensagem, agente, opcoes) {
  * E confirma que o email é mesmo da pessoa — sem isso, bastava
  * saber o endereço de alguém para lhe fechar a conta.
  */
+/**
+ * A palavra-passe mudou.
+ *
+ * Se não foi ele, é assim que fica a saber — e ainda vai a tempo
+ * de recuperar a conta. Uma mudança em silêncio é a última coisa
+ * que um dono de conta quer.
+ */
+export async function sendPasswordChanged(email) {
+  try {
+    if (!email) return { sent: false, reason: 'no-email' };
+
+    const html = wrap({
+      preheader: 'Your password was changed.',
+      heading: 'Your password was changed',
+
+      intro: 'This is a confirmation that the password on your ' +
+             'Airportlink account was just changed.',
+
+      blocks: [
+        {
+          type: 'note',
+          tone: 'warn',
+          text: 'If this was not you, write to us right away. ' +
+                'Someone else may have access to your account.'
+        }
+      ],
+
+      cta: {
+        label: 'Contact support',
+        url: `${SITE}/support`
+      },
+
+      signOff: 'The Airportlink — Ops team'
+    });
+
+    return await sendOnce({
+      /**
+       * A hora entra na chave.
+       *
+       * Alguém que mude a password duas vezes no mesmo dia deve
+       * receber dois avisos — o segundo é o que diz que algo está
+       * errado.
+       */
+      key: `pwchange:${email}:${Date.now()}`,
+      template: 'password_changed',
+      to: email,
+      subject: 'Your Airportlink password was changed',
+      html
+    });
+  } catch (error) {
+    console.error('sendPasswordChanged failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendDeletionConfirm({ email, token }) {
   try {
     if (!email || !token) return { sent: false, reason: 'missing' };
