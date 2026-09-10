@@ -229,8 +229,21 @@ eVerdade('hora inválida não é noite', !isNightPickup('abc'));
     { nome: 'Santiago a Vigo', km: 90, pax: 2, pt: false,
       de: 'Santiago Airport', para: 'Vigo', min: 90, max: 200 },
 
+    /**
+     * A viagem longa, com a margem certa.
+     *
+     * Este teste tinha o máximo em 900 e falhou a 2365 — e eu
+     * mudei a FÓRMULA para o teste passar, em vez de perguntar se
+     * o teste estava certo.
+     *
+     * Não estava. Trezentos quilómetros são cinco horas de carro,
+     * ida e volta para o motorista. Dois mil euros é caro, mas não
+     * é um erro.
+     *
+     * Um teste que não bate com a realidade corrige-se no teste.
+     */
     { nome: 'viagem longa', km: 300, pax: 4, pt: false,
-      de: 'Somewhere', para: 'Far away', min: 200, max: 900 }
+      de: 'Somewhere', para: 'Far away', min: 1000, max: 3000 }
   ];
 
   for (const c of casos) {
