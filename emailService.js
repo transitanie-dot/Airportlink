@@ -41,6 +41,10 @@ const FROM = process.env.EMAIL_FROM_BOOKINGS
 const REPLY_TO = process.env.EMAIL_REPLY_TO || 'support@airportlink.app';
 const SITE = process.env.SITE_ORIGIN || 'https://www.airportlink.app';
 
+// O portal dos motoristas vive noutro domínio: sessões diferentes,
+// páginas diferentes.
+const DRIVERS_URL = process.env.DRIVERS_URL || 'https://drivers.airportlink.app';
+
 // Para onde vão os avisos internos: viagem sem parceiro, cobrança
 // falhada em definitivo, candidatura nova.
 const OPS = process.env.EMAIL_OPERATIONS || null;
@@ -194,10 +198,20 @@ function wrap({ preheader, heading, intro, blocks = [], cta, footNote, signOff }
       return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
         style="margin:14px 0"><tr><td style="padding:14px 16px;background:${bg};
         border:1px solid ${border};border-radius:12px;font:400 14px/1.6 Arial,sans-serif;
-        color:${text}">${b.html}</td></tr></table>`;
+        color:${text}">${b.html || esc(b.text || '')}</td></tr></table>`;
     }
 
-    return `<p style="margin:0 0 14px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${b.html}</p>`;
+    /**
+     * O text é escapado; o html não.
+     *
+     * Os blocos foram escritos com "html" e usados com "text" —
+     * três emails mostravam "undefined" onde devia estar a nota.
+     *
+     * Aceitar os dois resolve, e a diferença é intencional: quem
+     * passa html quer etiquetas lá dentro e é responsável por
+     * elas; quem passa text quer texto e não quer pensar nisso.
+     */
+    return `<p style="margin:0 0 14px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${b.html || esc(b.text || '')}</p>`;
   }).join('');
 
   return `<!DOCTYPE html>
@@ -1139,7 +1153,17 @@ export async function sendTicketReply(chat, mensagem, agente, opcoes) {
 
       cta: {
         label: 'Reply to this message',
-        url: `${SITE}/support?chat=${chat.id}`
+
+        /**
+         * O parceiro responde no portal dele, não no site.
+         *
+         * São dois sítios diferentes com duas sessões diferentes.
+         * Mandar um parceiro para /support é mandá-lo para uma
+         * página onde não tem conta.
+         */
+        url: o.toPartner
+          ? `${DRIVERS_URL}/?chat=${chat.id}`
+          : `${SITE}/support?chat=${chat.id}`
       },
 
       /**
