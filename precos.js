@@ -335,4 +335,12 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
 }
 
 
-export { computePriceEUR, isNightPickup, resolveVehicleClass };
+export {
+  computePriceEUR,
+  isNightPickup,
+  resolveVehicleClass,
+
+  // As classes, para quem precise de validar uma escolha sem
+  // manter uma segunda lista.
+  VEHICLE_CLASSES
+};
