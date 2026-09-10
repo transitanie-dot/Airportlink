@@ -697,116 +697,118 @@ export function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
  * mercado novo é uma linha de SQL, e a calculadora acompanha
  * sozinha.
  */
-let paisesCache = { set: null, at: 0 };
-
 /**
- * O interruptor de emergência.
+ * Os países que NÃO servimos.
  *
- * COVERAGE_CHECK=off nas variáveis de ambiente desliga a
- * verificação por completo — a calculadora dá preço para todo o
- * lado, como fazia antes de hoje.
+ * A lógica estava ao contrário: procurava os países que servimos
+ * e recusava quando não encontrava nenhum. Uma morada como
+ * "Hotel Maroa, Vigo" não tem a palavra "Spain" — e era recusada,
+ * apesar de Vigo ser uma cidade onde operamos.
  *
- * Existe porque uma verificação que recusa TUDO é pior do que
- * verificação nenhuma: uma deixa entrar reservas que se resolvem
- * com um telefonema, a outra fecha a loja.
+ * Assim, só se recusa quando o país aparece EXPLICITAMENTE na
+ * lista dos que ficaram de fora. Tudo o resto passa.
  *
- * Mudar uma variável no Render é um reinício de trinta segundos.
- * Publicar uma correção é um deploy.
+ * É a diferença entre "prove que servimos aqui" e "só recuso o
+ * que sei que não servimos" — e a segunda é a única que não fecha
+ * a loja quando algo corre mal.
  */
+let foraCache = { set: null, at: 0 };
+
 const COBERTURA_LIGADA = process.env.COVERAGE_CHECK !== 'off';
 
-async function paisesQueServimos() {
-  if (paisesCache.set && Date.now() - paisesCache.at < 60 * 60 * 1000) {
-    return paisesCache.set;
+
+async function paisesForaDaLista() {
+  if (foraCache.set && Date.now() - foraCache.at < 60 * 60 * 1000) {
+    return foraCache.set;
   }
 
   const { data, error } = await supabase
     .from('airports')
-    .select('country')
-    .eq('operational', true)
+    .select('country, operational')
+    .limit(10000);
 
-    /**
-     * O limite explícito.
-     *
-     * O Supabase devolve mil linhas por omissão. São 440
-     * aeroportos hoje, mas isto cresce — e no dia em que passar de
-     * mil, os países do fim da lista desapareciam sem erro
-     * nenhum.
-     */
-    .limit(5000);
+  if (error || !data || data.length === 0) {
+    console.error('coverage lookup failed:', error?.message || 'no rows');
+    return null;
+  }
 
   /**
-   * Se a consulta falhar, NÃO se guarda um conjunto vazio.
+   * Um país fica de fora quando NENHUM dos aeroportos dele é
+   * operacional.
    *
-   * Era isto que fechava a calculadora: uma falha momentânea da
-   * base devolvia zero países, o cache guardava esse vazio por uma
-   * hora, e durante essa hora nenhum cliente conseguia um preço em
-   * lado nenhum.
-   *
-   * Devolver null faz o chamador tratar como "não sei" em vez de
-   * "não servimos" — e na dúvida, deixa passar.
+   * A Colômbia com dois aeroportos, um operacional, está dentro.
+   * O Botswana, com todos desligados, está fora.
    */
-  if (error || !data || data.length === 0) {
-    console.error('coverage lookup failed:',
-      error?.message || 'no rows returned');
+  const temOperacional = new Set();
+  const todos = new Set();
 
-    telegramTaskFailed('coverage lookup',
-      error?.message || 'The airports table returned no rows. ' +
+  for (const a of data) {
+    if (!a.country) continue;
+    todos.add(a.country);
+    if (a.operational === true) temOperacional.add(a.country);
+  }
+
+  const fora = new Set(
+    [...todos].filter((c) => !temOperacional.has(c))
+  );
+
+  /**
+   * Se TODOS estiverem fora, algo está errado com os dados.
+   *
+   * Guardar isso significaria recusar o mundo inteiro durante uma
+   * hora — que foi exatamente o que aconteceu.
+   */
+  if (temOperacional.size === 0) {
+    console.error('coverage: no operational airports at all');
+
+    telegramTaskFailed('coverage',
+      'No operational airports in the table. ' +
       'The calculator is letting everything through.'
     ).catch(() => {});
 
     return null;
   }
 
-  const paises = new Set(data.map((a) => a.country).filter(Boolean));
+  foraCache = { set: fora, at: Date.now() };
 
-  paisesCache = { set: paises, at: Date.now() };
-
-  return paises;
+  return fora;
 }
 
 
 /**
- * O país de uma morada, pelo texto.
+ * Esta morada é de um país que não servimos?
  *
- * O Google devolve o nome do país no fim da morada formatada —
- * "Rua X, Lisboa, Portugal". É o que se procura, e é suficiente
- * para o que isto decide.
+ * Devolve o nome do país quando é para recusar, e null quando é
+ * para deixar passar — incluindo quando não sabemos.
  */
-async function paisDaMorada(texto) {
-  if (!texto) return null;
+async function paisForaDaLista(texto) {
+  if (!texto || !COBERTURA_LIGADA) return null;
 
-  // Desligada por variável de ambiente.
-  if (!COBERTURA_LIGADA) return 'SERVIMOS_TUDO';
+  const fora = await paisesForaDaLista();
 
-  const paises = await paisesQueServimos();
-
-  /**
-   * Sem lista, deixa passar.
-   *
-   * O SERVIMOS_TUDO é um sinal, não um país: diz ao chamador que
-   * a verificação não pôde ser feita.
-   *
-   * Recusar uma reserva porque a nossa base não respondeu é
-   * castigar o cliente por um problema nosso — e uma reserva a
-   * mais num sítio onde não operamos resolve-se com um telefonema.
-   */
-  if (!paises || paises.size === 0) return 'SERVIMOS_TUDO';
+  // Sem lista, deixa passar.
+  if (!fora || fora.size === 0) return null;
 
   const lower = String(texto).toLowerCase();
 
-  for (const p of paises) {
-    // No fim da morada, que é onde o Google o põe.
-    if (lower.endsWith(p.toLowerCase())) return p;
-  }
-
-  // E em qualquer sítio, se não estiver no fim.
-  for (const p of paises) {
-    if (lower.includes(p.toLowerCase())) return p;
+  for (const p of fora) {
+    /**
+     * O país no fim da morada.
+     *
+     * O Google escreve-o sempre no fim: "Rua X, Gaborone,
+     * Botswana". Procurá-lo no meio do texto daria falsos
+     * positivos — "Chad" apanha "Chadwick Road".
+     */
+    if (lower.endsWith(', ' + p.toLowerCase())
+        || lower.endsWith(' ' + p.toLowerCase())
+        || lower === p.toLowerCase()) {
+      return p;
+    }
   }
 
   return null;
 }
+
 
 
 /**
@@ -2342,13 +2344,6 @@ app.post('/register', async (req, res) => {
  * antes de haver sessão.
  */
 app.get('/api/coverage', async (req, res) => {
-  /**
-   * Trinta por minuto.
-   *
-   * Chamada a cada cálculo de preço, e um cliente indeciso muda de
-   * morada várias vezes. Mais generosa que o checkout porque só
-   * toca na nossa base.
-   */
   if (limitar('coverage', req, res, { max: 30, segundos: 60 })) return;
 
   try {
@@ -2359,49 +2354,45 @@ app.get('/api/coverage', async (req, res) => {
       return res.status(400).json({ error: 'Send from and to.' });
     }
 
-    const paisDe = await paisDaMorada(de);
-    const paisPara = await paisDaMorada(para);
+    /**
+     * Só se recusa o que sabemos que não servimos.
+     *
+     * Antes, procurava-se o país na lista dos que servimos e
+     * recusava-se quando não aparecia. Mas "Hotel Maroa, Vigo" não
+     * tem a palavra "Spain" — e era recusado, apesar de Vigo ser
+     * uma cidade onde operamos.
+     *
+     * Agora: se o país estiver na lista dos que ficaram de fora,
+     * recusa. Tudo o resto passa.
+     */
+    const foraDe = await paisForaDaLista(de);
+    const foraPara = await paisForaDaLista(para);
 
     /**
-     * Basta um dos lados.
+     * Basta um lado estar fora.
      *
-     * Um transfer de Faro para Sevilha atravessa a fronteira, e os
-     * dois países estão na lista. Mas um de Lisboa para uma aldeia
-     * cujo nome o Google escreve sem o país também deve passar —
-     * exigir os dois recusaria viagens que sabemos fazer.
+     * Um transfer de Faro para o Botswana não se faz, mesmo que a
+     * origem seja um sítio onde operamos.
      */
-    const servimos = Boolean(paisDe || paisPara);
-
-    /**
-     * O sinal não é um país.
-     *
-     * O SERVIMOS_TUDO diz que a verificação não pôde ser feita.
-     * Mostrá-lo ao cliente como país de origem seria absurdo.
-     */
-    const limpo = (p) => (p === 'SERVIMOS_TUDO' ? null : p);
+    const bloqueado = foraDe || foraPara;
 
     return res.json({
-      covered: servimos,
-      from_country: limpo(paisDe),
-      to_country: limpo(paisPara),
+      covered: !bloqueado,
+      blocked_country: bloqueado || null,
 
-      message: servimos ? null
-        : 'We are not operating here yet. Write to us and we will ' +
-          'tell you when we are.'
+      message: bloqueado
+        ? `We are not operating in ${bloqueado} yet. ` +
+          'Write to us and we will tell you when we are.'
+        : null
     });
   } catch (error) {
     console.error('coverage:', error.message);
 
-    /**
-     * Na dúvida, deixa passar.
-     *
-     * Uma falha desta rota não deve impedir uma reserva de um
-     * sítio onde servimos. O checkout verifica outra vez, e é lá
-     * que a decisão conta.
-     */
+    // Na dúvida, deixa passar.
     return res.json({ covered: true, error: error.message });
   }
 });
+
 
 
 app.post('/api/create-checkout-session', async (req, res) => {
@@ -2679,13 +2670,21 @@ app.post('/api/create-checkout-session', async (req, res) => {
    * reserva paga para um sítio onde não há ninguém custa mais a
    * desfazer do que a recusar.
    */
-  const cobertoDe = await paisDaMorada(booking.pickup);
-  const cobertoPara = await paisDaMorada(booking.dropoff);
+  /**
+   * A última verificação, antes de cobrar.
+   *
+   * Só recusa países que estão explicitamente fora. Uma morada que
+   * não diga o país passa — e passa bem: a maioria das moradas
+   * reais não tem o país escrito.
+   */
+  const foraDe = await paisForaDaLista(booking.pickup);
+  const foraPara = await paisForaDaLista(booking.dropoff);
 
-  if (!cobertoDe && !cobertoPara) {
+  if (foraDe || foraPara) {
     return res.status(400).json({
-      error: 'We are not operating in that country yet. ' +
-             'Write to us and we will tell you when we are.'
+      error: `We are not operating in ${foraDe || foraPara} yet. ` +
+             'Write to us and we will tell you when we are.',
+      field_error: true
     });
   }
 
