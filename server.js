@@ -699,17 +699,66 @@ export function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
  */
 let paisesCache = { set: null, at: 0 };
 
+/**
+ * O interruptor de emergência.
+ *
+ * COVERAGE_CHECK=off nas variáveis de ambiente desliga a
+ * verificação por completo — a calculadora dá preço para todo o
+ * lado, como fazia antes de hoje.
+ *
+ * Existe porque uma verificação que recusa TUDO é pior do que
+ * verificação nenhuma: uma deixa entrar reservas que se resolvem
+ * com um telefonema, a outra fecha a loja.
+ *
+ * Mudar uma variável no Render é um reinício de trinta segundos.
+ * Publicar uma correção é um deploy.
+ */
+const COBERTURA_LIGADA = process.env.COVERAGE_CHECK !== 'off';
+
 async function paisesQueServimos() {
   if (paisesCache.set && Date.now() - paisesCache.at < 60 * 60 * 1000) {
     return paisesCache.set;
   }
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('airports')
     .select('country')
-    .eq('operational', true);
+    .eq('operational', true)
 
-  const paises = new Set((data || []).map((a) => a.country).filter(Boolean));
+    /**
+     * O limite explícito.
+     *
+     * O Supabase devolve mil linhas por omissão. São 440
+     * aeroportos hoje, mas isto cresce — e no dia em que passar de
+     * mil, os países do fim da lista desapareciam sem erro
+     * nenhum.
+     */
+    .limit(5000);
+
+  /**
+   * Se a consulta falhar, NÃO se guarda um conjunto vazio.
+   *
+   * Era isto que fechava a calculadora: uma falha momentânea da
+   * base devolvia zero países, o cache guardava esse vazio por uma
+   * hora, e durante essa hora nenhum cliente conseguia um preço em
+   * lado nenhum.
+   *
+   * Devolver null faz o chamador tratar como "não sei" em vez de
+   * "não servimos" — e na dúvida, deixa passar.
+   */
+  if (error || !data || data.length === 0) {
+    console.error('coverage lookup failed:',
+      error?.message || 'no rows returned');
+
+    telegramTaskFailed('coverage lookup',
+      error?.message || 'The airports table returned no rows. ' +
+      'The calculator is letting everything through.'
+    ).catch(() => {});
+
+    return null;
+  }
+
+  const paises = new Set(data.map((a) => a.country).filter(Boolean));
 
   paisesCache = { set: paises, at: Date.now() };
 
@@ -727,7 +776,23 @@ async function paisesQueServimos() {
 async function paisDaMorada(texto) {
   if (!texto) return null;
 
+  // Desligada por variável de ambiente.
+  if (!COBERTURA_LIGADA) return 'SERVIMOS_TUDO';
+
   const paises = await paisesQueServimos();
+
+  /**
+   * Sem lista, deixa passar.
+   *
+   * O SERVIMOS_TUDO é um sinal, não um país: diz ao chamador que
+   * a verificação não pôde ser feita.
+   *
+   * Recusar uma reserva porque a nossa base não respondeu é
+   * castigar o cliente por um problema nosso — e uma reserva a
+   * mais num sítio onde não operamos resolve-se com um telefonema.
+   */
+  if (!paises || paises.size === 0) return 'SERVIMOS_TUDO';
+
   const lower = String(texto).toLowerCase();
 
   for (const p of paises) {
@@ -2307,10 +2372,18 @@ app.get('/api/coverage', async (req, res) => {
      */
     const servimos = Boolean(paisDe || paisPara);
 
+    /**
+     * O sinal não é um país.
+     *
+     * O SERVIMOS_TUDO diz que a verificação não pôde ser feita.
+     * Mostrá-lo ao cliente como país de origem seria absurdo.
+     */
+    const limpo = (p) => (p === 'SERVIMOS_TUDO' ? null : p);
+
     return res.json({
       covered: servimos,
-      from_country: paisDe,
-      to_country: paisPara,
+      from_country: limpo(paisDe),
+      to_country: limpo(paisPara),
 
       message: servimos ? null
         : 'We are not operating here yet. Write to us and we will ' +
