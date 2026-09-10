@@ -1116,20 +1116,39 @@ export async function sendTicketReply(chat, mensagem, agente, opcoes) {
      * uma resposta do apoio. Dizer de quem é poupa a pergunta — e
      * torna a citação compreensível.
      */
-    const deQuem = o.fromDriver
-      ? 'Please see below, a direct message from your driver:'
-      : (o.fromPartner
-          ? 'Please see below, a message from the transport company:'
-          : (o.outbound
-              ? 'We are writing to you about your booking:'
-              : `${agente?.display_name || 'Our team'} replied to your message:`));
+    /**
+     * De quem é a mensagem, do ponto de vista de quem a lê.
+     *
+     * Um parceiro que receba "uma mensagem do seu motorista" fica
+     * confuso — o motorista é dele. Para ele, o que interessa
+     * saber é que veio do cliente.
+     *
+     * É a mesma mensagem, lida dos dois lados: o cliente quer
+     * saber que veio do motorista, o motorista quer saber que veio
+     * do cliente.
+     */
+    const deQuem = o.toPartner
+      ? (o.fromCustomer
+          ? 'Please see below, a message from the passenger:'
+          : 'We are writing to you about a ride:')
+
+      : (o.fromDriver
+          ? 'Please see below, a direct message from your driver:'
+          : (o.fromPartner
+              ? 'Please see below, a message from the transport company:'
+              : (o.outbound
+                  ? 'We are writing to you about your booking:'
+                  : `${agente?.display_name || 'Our team'} replied to your message:`)));
 
     const html = wrap({
-      preheader: o.outbound
-        ? 'A message about your booking.'
-        : 'We replied to your message.',
+      preheader: o.toPartner
+        ? 'A message about a ride.'
+        : (o.outbound ? 'A message about your booking.'
+                      : 'We replied to your message.'),
 
-      heading: o.outbound ? 'About your booking' : 'We replied',
+      heading: o.toPartner
+        ? 'About a ride'
+        : (o.outbound ? 'About your booking' : 'We replied'),
 
       intro: `${saudacao}\n\n${deQuem}`,
 
