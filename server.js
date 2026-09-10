@@ -34,7 +34,11 @@ import {
 import {
   computePriceEUR,
   isNightPickup,
-  resolveVehicleClass
+  resolveVehicleClass,
+
+  // As classes conhecidas, para a validação não ter uma lista
+  // própria a divergir da de cálculo.
+  VEHICLE_CLASSES
 } from './precos.js';
 
 /**
@@ -2392,10 +2396,29 @@ app.post('/api/create-checkout-session', async (req, res) => {
    * nenhuma viatura.
    */
   if (booking.vehicle_class) {
-    const classes = ['sedan', 'van', 'premium', 'minibus'];
+    /**
+     * As classes vêm do cálculo, não de uma lista à mão.
+     *
+     * Esta lista dizia ['sedan', 'van', 'premium', 'minibus'] —
+     * faltavam o van_sedan e o two_vans, que o site oferece, e
+     * tinha um "minibus" que não existe em lado nenhum.
+     *
+     * Quem escolhesse Van + Sedan levava com "Unknown vehicle
+     * class" e não conseguia pagar.
+     *
+     * Uma lista escrita à mão ao lado da lista a sério vai
+     * divergir. Ler da fonte não pode divergir.
+     */
+    const conhecidas = Object.keys(VEHICLE_CLASSES);
 
-    if (!classes.includes(String(booking.vehicle_class).toLowerCase())) {
-      return res.status(400).json({ error: 'Unknown vehicle class.', field_error: true });
+    if (!conhecidas.includes(String(booking.vehicle_class).toLowerCase())) {
+      console.warn('unknown vehicle class:', booking.vehicle_class,
+        '| conhecidas:', conhecidas.join(', '));
+
+      return res.status(400).json({
+        error: 'Unknown vehicle class.',
+        field_error: true
+      });
     }
   }
 
