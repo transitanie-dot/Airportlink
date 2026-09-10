@@ -138,7 +138,7 @@ function shortTime(timeStr) {
  * stylesheets e trata flexbox como se não existisse — é feio de
  * escrever mas é o que aparece igual em todo o lado.
  */
-function wrap({ preheader, heading, intro, blocks = [], cta, footNote }) {
+function wrap({ preheader, heading, intro, blocks = [], cta, footNote, signOff }) {
   const rows = blocks.map((b) => {
     if (b.type === 'facts') {
       return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
@@ -218,7 +218,9 @@ function wrap({ preheader, heading, intro, blocks = [], cta, footNote }) {
     <tr><td style="padding:28px 26px 8px">
       <h1 style="margin:0 0 12px;font:700 23px/1.2 Arial,sans-serif;
         letter-spacing:-.5px;color:#141A28">${esc(heading)}</h1>
-      ${intro ? `<p style="margin:0 0 16px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${intro}</p>` : ''}
+      ${intro ? intro.split('\n\n').map((par) =>
+        `<p style="margin:0 0 16px;font:400 15px/1.65 Arial,sans-serif;color:#3B4354">${esc(par)}</p>`
+      ).join('') : ''}
       ${rows}
       ${cta ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 6px">
         <tr><td style="background:#0F766E;border-radius:12px">
@@ -229,6 +231,7 @@ function wrap({ preheader, heading, intro, blocks = [], cta, footNote }) {
     </td></tr>
 
     <tr><td style="padding:18px 26px 26px">
+      ${signOff ? `<p style="margin:0 0 18px;font:400 14px/1.6 Arial,sans-serif;color:#2A3342">${esc(signOff)}</p>` : ''}
       ${footNote ? `<p style="margin:0 0 14px;font:400 13px/1.6 Arial,sans-serif;color:#606A7B">${footNote}</p>` : ''}
       <div style="border-top:1px solid #E2E5E0;padding-top:16px;
         font:400 12px/1.7 Arial,sans-serif;color:#8A93A3">
@@ -1071,34 +1074,82 @@ export async function sendRideChanged(partner, booking, mudanca) {
  * embora. Sem o email, a resposta fica num sítio que ninguém vai
  * ver.
  */
-export async function sendTicketReply(chat, mensagem, agente) {
+export async function sendTicketReply(chat, mensagem, agente, opcoes) {
   try {
     if (!chat?.email) return { sent: false, reason: 'no-email' };
 
-    const html = wrap({
-      preheader: 'We replied to your message.',
-      heading: 'We replied',
+    const o = opcoes || {};
 
-      intro: `${agente?.display_name || 'Our team'} answered your message.`,
+    /**
+     * O primeiro nome, quando o temos.
+     *
+     * "Hi Bronagh" lê-se como uma pessoa a escrever a outra. "Dear
+     * customer" lê-se como um sistema — e um sistema não merece
+     * resposta.
+     *
+     * Só o primeiro: o nome completo numa saudação soa a carta do
+     * banco.
+     */
+    const nome = String(chat.full_name || chat.name || '')
+      .trim().split(/\s+/)[0];
+
+    const saudacao = nome && nome.length > 1 ? `Hi ${nome},` : 'Hello,';
+
+    /**
+     * Quem escreveu, e de onde.
+     *
+     * Uma mensagem que vem do motorista não é a mesma coisa que
+     * uma resposta do apoio. Dizer de quem é poupa a pergunta — e
+     * torna a citação compreensível.
+     */
+    const deQuem = o.fromDriver
+      ? 'Please see below, a direct message from your driver:'
+      : (o.fromPartner
+          ? 'Please see below, a message from the transport company:'
+          : (o.outbound
+              ? 'We are writing to you about your booking:'
+              : `${agente?.display_name || 'Our team'} replied to your message:`));
+
+    const html = wrap({
+      preheader: o.outbound
+        ? 'A message about your booking.'
+        : 'We replied to your message.',
+
+      heading: o.outbound ? 'About your booking' : 'We replied',
+
+      intro: `${saudacao}\n\n${deQuem}`,
 
       blocks: [
         {
           type: 'quote',
-          text: String(mensagem || '').slice(0, 1200)
+          text: String(mensagem || '').slice(0, 1500)
         },
 
         {
+          /**
+           * Como responder, numa linha.
+           *
+           * O botão está mesmo acima. Explicá-lo em três frases
+           * fazia parecer complicado uma coisa que é um clique.
+           */
           type: 'note',
-          text: 'Reply on the site and we will pick it up from there. ' +
-                'You can send one message at a time — we answer each one ' +
-                'before you write the next.'
+          text: 'You can reply by clicking the button above.'
         }
       ],
 
       cta: {
-        label: 'Open the conversation',
+        label: 'Reply to this message',
         url: `${SITE}/support?chat=${chat.id}`
       },
+
+      /**
+       * A assinatura, como numa carta.
+       *
+       * "The Airportlink Ops team" diz que há pessoas do outro
+       * lado. É o que faz a diferença entre um email que se
+       * responde e um que se arquiva.
+       */
+      signOff: 'The Airportlink — Ops team',
 
       footNote: chat.ticket ? `Reference ${chat.ticket}` : null
     });
