@@ -751,7 +751,15 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
   if (!Number.isFinite(hours)) {
     return {
       allowed: false,
+      /**
+       * Um código, para o browser traduzir.
+       *
+       * A frase em inglês fica como recurso: se o browser não
+       * conhecer o código, mostra-a. Melhor do que um espaço
+       * vazio.
+       */
       reason: 'Pick a date and time first.',
+      code: 'noDate',
       rules
     };
   }
@@ -759,6 +767,9 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
   if (hours < rules.min_hours_for_later) {
     return {
       allowed: false,
+      code: 'tooSoon',
+      hours: Math.round(hours),
+      minHours: rules.min_hours_for_later,
       reason: `Pick-up is in about ${Math.round(hours)} hours. Paying later needs at least ` +
         `${rules.min_hours_for_later} hours' notice, so this one is paid now.`,
       rules
@@ -769,6 +780,7 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
     return {
       allowed: false,
       reason: 'Transfers above our higher-value threshold are paid at booking.',
+      code: 'tooExpensive',
       rules
     };
   }
@@ -776,6 +788,9 @@ async function payLaterEligibility({ dateStr, timeStr, priceEUR, distanceKm, isA
   if (Number(distanceKm) > Number(rules.max_km_for_later)) {
     return {
       allowed: false,
+      code: 'tooLong',
+      km: Math.round(distanceKm),
+      maxKm: rules.max_km_for_later,
       reason: `This route is about ${Math.round(distanceKm)} km. Journeys over ` +
         `${rules.max_km_for_later} km are paid at booking.`,
       rules
