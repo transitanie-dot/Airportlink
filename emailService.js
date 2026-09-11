@@ -142,6 +142,19 @@ function shortTime(timeStr) {
  * stylesheets e trata flexbox como se não existisse — é feio de
  * escrever mas é o que aparece igual em todo o lado.
  */
+/**
+ * O molde de todos os emails.
+ *
+ * O "cta" aceita href OU url, de propósito.
+ *
+ * O molde sempre leu cta.href. Metade dos emails foi escrita com
+ * cta.url — e nesses o href saía vazio: o botão aparecia bonito e
+ * não ia a lado nenhum.
+ *
+ * Dez emails estiveram assim, e ninguém reparou porque um botão
+ * morto não dá erro. Aceitar os dois nomes custa nove caracteres
+ * e resolve todos de uma vez.
+ */
 function wrap({ preheader, heading, intro, blocks = [], cta, footNote, signOff }) {
   const rows = blocks.map((b) => {
     if (b.type === 'facts') {
@@ -238,7 +251,7 @@ function wrap({ preheader, heading, intro, blocks = [], cta, footNote, signOff }
       ${rows}
       ${cta ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 6px">
         <tr><td style="background:#0F766E;border-radius:12px">
-          <a href="${esc(cta.href)}" style="display:inline-block;padding:14px 26px;
+          <a href="${esc(cta.href || cta.url || '')}" style="display:inline-block;padding:14px 26px;
             font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;
             text-transform:uppercase;color:#FFFFFF;text-decoration:none">${esc(cta.label)}</a>
         </td></tr></table>` : ''}
