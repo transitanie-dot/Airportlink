@@ -21,6 +21,10 @@ import {
   telegramNewAgency,
   telegramNewAccount,
 
+  // Pedidos pelo serviço dos drivers, pela rota /api/internal/alert.
+  telegramNewChat,
+  telegramNewPartner,
+
   /**
    * Os alarmes que vigiam números plausíveis mas errados.
    *
@@ -104,6 +108,9 @@ import {
   // ficou semanas sem os mandar.
   sendVerifyPartner,
   sendVerifyCustomer,
+
+  // Para quem ficou com a conta criada e sem forma de entrar.
+  sendPartnerAccessLink,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -6808,6 +6815,196 @@ app.get('/api/tasks/calendar-test', async (req, res) => {
     note: 'A test event was created for tomorrow at 14:30. Turquoise, ' +
       'because it has no driver. Delete it by hand when you have seen it.'
   });
+});
+
+
+/**
+ * ---------------------------------------------------------------
+ * REENVIAR AS CONFIRMAÇÕES QUE NUNCA SAÍRAM
+ *
+ * A função de envio era um stub que devolvia { sent: true } sem
+ * enviar nada. Durante semanas, quem se registou não recebeu o
+ * email — e sem ele não entra, e não entrando não envia
+ * documentos.
+ *
+ * Isto manda a cada um o link de confirmação. Uma vez, à mão.
+ *
+ * Corre com:
+ *   curl -H "x-cron-secret: SEGREDO" \
+ *     "https://airportlink.onrender.com/api/tasks/resend-verification"
+ *
+ * Acrescenta ?dry=1 para ver a lista sem enviar nada.
+ * ---------------------------------------------------------------
+ */
+/**
+ * ---------------------------------------------------------------
+ * OS AVISOS PEDIDOS PELO SERVIÇO DOS DRIVERS
+ *
+ * O telegram.js vive só aqui. O outro serviço pede por esta rota,
+ * como já faz para os emails.
+ *
+ * Uma cópia do telegram.js lá seriam dois sítios a manter — e o
+ * dia em que divergissem, um canal ficava calado sem ninguém
+ * saber.
+ * ---------------------------------------------------------------
+ */
+app.post('/api/internal/alert', async (req, res) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(500).json({ error: 'CRON_SECRET is not configured.' });
+  }
+
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    console.warn('internal/alert called with a bad secret');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { tipo, dados } = req.body || {};
+
+  const AVISOS = {
+    new_chat: telegramNewChat,
+    new_account: telegramNewAccount,
+    new_agency: telegramNewAgency,
+    new_partner: telegramNewPartner
+  };
+
+  const fn = AVISOS[tipo];
+
+  if (!fn) {
+    return res.status(400).json({
+      error: `Unknown alert: ${tipo}`,
+      allowed: Object.keys(AVISOS)
+    });
+  }
+
+  try {
+    await fn(dados || {});
+    return res.json({ sent: true });
+  } catch (e) {
+    console.error('internal/alert:', tipo, e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
+app.get('/api/tasks/resend-verification', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const ensaio = req.query.dry === '1';
+
+  try {
+    /**
+     * Os parceiros que ainda não confirmaram.
+     *
+     * Só os que estão em draft ou pending: quem já foi aprovado
+     * entrou de alguma maneira, e mandar-lhe um email de
+     * confirmação agora seria confuso.
+     */
+    const { data: parceiros, error } = await supabase
+      .from('driver_partners')
+      .select('id, email, contact_name, trading_name, legal_name, status, created_at')
+      .in('status', ['draft', 'pending'])
+      .order('created_at');
+
+    if (error) throw error;
+
+    const out = { total: parceiros?.length || 0, enviados: 0, falhas: [], lista: [] };
+
+    for (const p of (parceiros || [])) {
+      if (!p.email) continue;
+
+      /**
+       * Já confirmou?
+       *
+       * Alguns podem ter confirmado por outra via — ou o SQL de
+       * recuperação pode já ter marcado o email como confirmado.
+       * Mandar outro link a esses é ruído.
+       */
+      const { data: u } = await supabase.auth.admin.getUserById(p.id);
+
+      if (u?.user?.email_confirmed_at) {
+        /**
+         * Já confirmado, mas provavelmente à mão.
+         *
+         * Se correste o SQL de recuperação, o email ficou marcado
+         * como confirmado — e um link de confirmação já não serve
+         * de nada.
+         *
+         * O que estas pessoas precisam é de definir a
+         * palavra-passe. O link de recuperação faz isso, e dá-lhes
+         * uma forma de entrar.
+         *
+         * Acrescenta ?recover=1 para mandar estes em vez de os
+         * saltar.
+         */
+        if (req.query.recover === '1' && !ensaio) {
+          try {
+            const { data: rec } = await supabase.auth.admin.generateLink({
+              type: 'recovery',
+              email: p.email,
+              options: {
+                redirectTo: (process.env.DRIVERS_URL ||
+                  'https://drivers.airportlink.app') + '/?recovered=1'
+              }
+            });
+
+            const link = rec?.properties?.action_link;
+
+            if (link) {
+              await sendPartnerAccessLink({
+                email: p.email,
+                name: p.contact_name,
+                company: p.trading_name || p.legal_name,
+                link
+              });
+
+              out.enviados += 1;
+              out.lista.push({ email: p.email, estado: 'link de acesso enviado' });
+            }
+          } catch (e2) {
+            out.falhas.push({ email: p.email, porque: e2.message });
+          }
+
+          await new Promise((r3) => setTimeout(r3, 500));
+          continue;
+        }
+
+        out.lista.push({ email: p.email, estado: 'já confirmado' });
+        continue;
+      }
+
+      if (ensaio) {
+        out.lista.push({ email: p.email, estado: 'ia receber' });
+        continue;
+      }
+
+      const r = await sendVerification(p.email, p.contact_name, 'partner');
+
+      if (r?.sent) {
+        out.enviados += 1;
+        out.lista.push({ email: p.email, estado: 'enviado' });
+      } else {
+        out.falhas.push({ email: p.email, porque: r?.reason || 'desconhecido' });
+      }
+
+      /**
+       * Meio segundo entre cada um.
+       *
+       * O Resend tem limites por segundo, e uma lista de trinta
+       * de uma vez pode levar com um 429 a meio — e aí metade
+       * continua sem receber.
+       */
+      await new Promise((r2) => setTimeout(r2, 500));
+    }
+
+    console.log('[resend-verification]', JSON.stringify(out));
+
+    return res.json({ ...out, ensaio });
+  } catch (e) {
+    console.error('resend-verification:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 
