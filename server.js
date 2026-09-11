@@ -6888,7 +6888,34 @@ app.post('/api/internal/alert', async (req, res) => {
 
 app.get('/api/tasks/resend-verification', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
+    /**
+     * Um 403 que diz porquê.
+     *
+     * "Forbidden" sozinho não distingue um segredo errado de um
+     * segredo em falta, nem de um espaço a mais colado sem querer.
+     *
+     * Isto não revela o segredo: diz só o comprimento e os
+     * primeiros caracteres, que chega para perceber se é o valor
+     * certo mal copiado.
+     */
+    const recebido = req.headers['x-cron-secret'];
+
+    console.warn('[cron] segredo recusado. recebido:',
+      recebido ? `${recebido.length} chars` : 'nenhum',
+      '| esperado:', process.env.CRON_SECRET
+        ? `${process.env.CRON_SECRET.length} chars` : 'NÃO CONFIGURADO');
+
+    return res.status(403).json({
+      error: 'Forbidden',
+      pista: !process.env.CRON_SECRET
+        ? 'CRON_SECRET não está configurado no servidor'
+        : !recebido
+          ? 'não enviaste o cabeçalho x-cron-secret'
+          : recebido.length !== process.env.CRON_SECRET.length
+            ? `enviaste ${recebido.length} caracteres, o servidor espera ` +
+              `${process.env.CRON_SECRET.length}`
+            : 'o comprimento bate mas o valor não — confirma que copiaste do Render'
+    });
   }
 
   const ensaio = req.query.dry === '1';
