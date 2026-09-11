@@ -2018,9 +2018,56 @@ async function sendVerification(email, name, kind) {
 
     if (error) throw error;
 
-    const link = data?.properties?.action_link;
+    /**
+     * O que o generateLink devolveu, por inteiro.
+     *
+     * O formato do action_link muda com a versão da API do
+     * Supabase — umas incluem o ?type=, outras não. Ver o objeto
+     * é mais rápido do que tentar formatos à vez.
+     */
+    console.log('[verify] properties:', JSON.stringify({
+      ...(data?.properties || {}),
+      hashed_token: data?.properties?.hashed_token
+        ? data.properties.hashed_token.slice(0, 10) + '…' : null
+    }));
+
+    let link = data?.properties?.action_link;
 
     if (!link) throw new Error('generateLink devolveu sem action_link');
+
+    /**
+     * O type, que o action_link às vezes não traz.
+     *
+     * O Supabase responde 400 com "Verify requires a verification
+     * type" quando o endereço não tem ?type=. O action_link
+     * devolvido pelo generateLink nem sempre o inclui — depende da
+     * versão da API.
+     *
+     * O properties traz o hashed_token e o verification_type em
+     * separado, e com eles monta-se o endereço à mão.
+     */
+    try {
+      const u = new URL(link);
+
+      if (!u.searchParams.get('type')) {
+        const tipo = data?.properties?.verification_type
+          || (kind === 'partner' ? 'magiclink' : 'magiclink');
+
+        u.searchParams.set('type', tipo);
+
+        // O token tem de ser o hashed_token quando se monta à mão.
+        const hashed = data?.properties?.hashed_token;
+        if (hashed) u.searchParams.set('token', hashed);
+
+        if (!u.searchParams.get('redirect_to')) {
+          u.searchParams.set('redirect_to', destino);
+        }
+
+        link = u.toString();
+      }
+    } catch (e) {
+      console.error('[verify] não consegui completar o link:', e.message);
+    }
 
     /**
      * O link, escrito no registo.
