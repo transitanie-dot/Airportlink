@@ -227,6 +227,15 @@ def recursao():
 
 PARES = [
     ('callcentre/public/assets/desk.js', 'callcentre/public/index.html'),
+
+    # O codigo destas paginas saiu do HTML para /assets/: cada
+    # visita descarregava 150 KB. Mas separa-los cria uma forma
+    # nova de errar — um $('algo') sobre um elemento que ja nao
+    # existe mata o script inteiro, e a pagina fica sem precos e
+    # sem moradas.
+    ('render-site/assets/home.js', 'render-site/index.html'),
+    ('render-site/assets/checkout.js', 'render-site/checkout/index.html'),
+    ('render-site/assets/booking.js', 'render-site/booking/index.html'),
 ]
 
 def ids_em_falta():
@@ -235,7 +244,9 @@ def ids_em_falta():
         if s is None or h is None:
             continue
 
+        # O desk.js usa el(); as paginas do site usam $().
         procurados = set(re.findall(r"el\('([\w-]+)'\)", s))
+        procurados |= set(re.findall(r"\$\('([\w-]+)'\)", s))
         existentes = set(re.findall(r'id="([\w-]+)"', h))
 
         # Os criados pelo próprio JS não contam.
@@ -654,9 +665,9 @@ def variaveis_de_fora():
     """
     import re
 
-    for caminho in ['render-site/index.html',
-                    'render-site/booking/index.html',
-                    'render-site/checkout/index.html']:
+    for caminho in ['render-site/assets/home.js',
+                    'render-site/assets/booking.js',
+                    'render-site/assets/checkout.js']:
         texto = ler(caminho)
         if texto is None:
             continue
@@ -1041,9 +1052,12 @@ def tabelas_de_preco():
     if fonte is None:
         return
 
+    # O código destas páginas vive em /assets/ desde que saiu do
+    # HTML: cada visita descarregava 150 KB. As tabelas foram com
+    # ele, e esta verificação procurava no sítio antigo.
     paginas = {
-        'booking': 'render-site/booking/index.html',
-        'checkout': 'render-site/checkout/index.html',
+        'booking': 'render-site/assets/booking.js',
+        'checkout': 'render-site/assets/checkout.js',
     }
 
     for nome_tab in ['ES_ZONES', 'PT_ZONES', 'IT_ZONES',
@@ -1111,6 +1125,74 @@ def origens_permitidas():
                  'diz "Failed to fetch".')
 
 
+def campos_inventados():
+    """
+    Um campo que o objeto nao tem.
+
+    O checkout chamava fare(km, mult, isPT, c.id) — mas as classes
+    do checkout sao um objeto indexado por nome e nao tem campo
+    "id". O c.id era undefined, e sem ele o preco caia no
+    multiplicador generico em vez do da zona.
+
+    A van em Ibiza mostrava 84 euros e o servidor cobrava 73. Onze
+    euros por reserva, sem erro nenhum no ecra.
+
+    Isto verifica os acessos a campos das tabelas de classes.
+    """
+    import re
+
+    for caminho in ['render-site/assets/checkout.js',
+                    'render-site/assets/booking.js',
+                    'render-site/assets/home.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        m = re.search(r'CLASSES\s*=\s*([\[{])', texto)
+        if not m:
+            continue
+
+        abre = m.group(1)
+        fecha = ']' if abre == '[' else '}'
+        i2 = texto.index(abre, m.start())
+        prof, k = 0, i2
+
+        while k < len(texto):
+            if texto[k] == abre:
+                prof += 1
+            elif texto[k] == fecha:
+                prof -= 1
+                if prof == 0:
+                    break
+            k += 1
+
+        bloco = texto[i2:k+1]
+
+        # os campos que as entradas tem
+        campos = set(re.findall(r'(\w+):\s*', bloco))
+
+        # Sem comentarios nem strings: "c.id" escrito numa
+        # explicacao nao e um acesso.
+        codigo = re.sub(r'/\*[\s\S]*?\*/', '', texto)
+        codigo = re.sub(r'//[^\n]*', '', codigo)
+        codigo = re.sub(r"'(?:[^'\\]|\\.)*'", "''", codigo)
+        codigo = re.sub(r'"(?:[^"\\]|\\.)*"', '""', codigo)
+
+        # e os que o codigo le
+        for m2 in re.finditer(r'\bc\.(\w+)\b', codigo):
+            campo = m2.group(1)
+
+            if campo in campos:
+                continue
+
+            linha = codigo[:m2.start()].count('\n') + 1
+
+            erro(caminho,
+                 f'perto da linha {linha}: le c.{campo}, e as entradas de CLASSES '
+                 f'nao tem esse campo (tem: {", ".join(sorted(campos)[:6])}). '
+                 'O valor e undefined e nao da erro nenhum.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -1138,6 +1220,7 @@ def main():
         ('botões de email', botoes_de_email),
         ('tabelas de preço', tabelas_de_preco),
         ('origens do CORS', origens_permitidas),
+        ('campos inventados', campos_inventados),
     ]
 
     for nome, fn in testes:
