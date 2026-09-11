@@ -1288,7 +1288,19 @@ export async function sendVerifyPartner({ email, name, company, link }) {
     });
 
     return await sendOnce({
-      key: `verifypartner:${email}`,
+      /**
+       * A chave leva o dia.
+       *
+       * Uma chave fixa impedia qualquer segundo envio, para
+       * sempre. Mas um link de confirmação expira em 24 horas —
+       * quem não clicou a tempo ficava sem forma de entrar, e um
+       * reenvio devolvia "duplicate" em silêncio.
+       *
+       * Com o dia na chave, um por dia passa. Chega para reenviar
+       * quando é preciso e evita mandar cinco seguidos por
+       * engano.
+       */
+      key: `verifypartner:${email}:${new Date().toISOString().slice(0, 10)}`,
       template: 'verify_partner',
       to: email,
       subject: 'Confirm your email — Airportlink partners',
@@ -1334,7 +1346,8 @@ export async function sendVerifyCustomer({ email, name, link }) {
     });
 
     return await sendOnce({
-      key: `verifycustomer:${email}`,
+      // Um por dia, pela mesma razão do email de parceiro.
+      key: `verifycustomer:${email}:${new Date().toISOString().slice(0, 10)}`,
       template: 'verify_customer',
       to: email,
       subject: 'Confirm your email — Airportlink',
