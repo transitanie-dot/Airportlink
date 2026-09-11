@@ -110,6 +110,9 @@ import {
 
   // Para quem ficou com a conta criada e sem forma de entrar.
   sendPartnerAccessLink,
+
+  // O código de seis dígitos para definir a palavra-passe.
+  sendResetCode,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -6605,6 +6608,185 @@ app.post('/api/client-error', async (req, res) => {
  * mesma tabela de utilizadores por trás dos quatro portais.
  * ---------------------------------------------------------------
  */
+/**
+ * ---------------------------------------------------------------
+ * DEFINIR A PALAVRA-PASSE, COM UM CÓDIGO NOSSO
+ *
+ * O resetPasswordForEmail do Supabase depende do serviço de email
+ * deles, que no plano gratuito manda poucos por hora e recusa em
+ * silêncio. Foi por isso que o "esqueci-me" não funcionou.
+ *
+ * Isto gera um código nosso, manda-o pelo Resend — que já leva
+ * todos os outros emails — e troca-o por uma sessão.
+ * ---------------------------------------------------------------
+ */
+app.post('/api/account/reset-request', async (req, res) => {
+  if (limitar('reset', req, res, { max: 4, segundos: 900 })) return;
+
+  const email = String(req.body?.email || '').trim().toLowerCase();
+
+  if (!email) {
+    return res.status(400).json({ error: 'Send an email address.', field_error: true });
+  }
+
+  try {
+    const { data: lista } = await supabase.auth.admin.listUsers();
+
+    const u = (lista?.users || []).find(
+      (x) => x.email?.toLowerCase() === email
+    );
+
+    /**
+     * A resposta é a mesma exista ou não a conta.
+     *
+     * Dizer "não há conta com esse email" diz a quem pergunta
+     * quais os emails registados — e isso é uma lista que não
+     * queremos dar.
+     */
+    if (!u) {
+      console.log('[reset] pedido para email sem conta:', email);
+      return res.json({ ok: true });
+    }
+
+    /**
+     * Um código de seis dígitos, válido por trinta minutos.
+     *
+     * Seis dígitos são 1 em 900 mil. Com quatro tentativas por
+     * quinze minutos, adivinhar leva séculos — e é curto o
+     * suficiente para se escrever à mão de um telemóvel para um
+     * computador.
+     */
+    const codigo = String(Math.floor(100000 + Math.random() * 900000));
+
+    const { error: erroGuardar } = await supabase
+      .from('password_resets')
+      .insert({
+        user_id: u.id,
+        email,
+        code: codigo,
+        expires_at: new Date(Date.now() + 30 * 60000).toISOString()
+      });
+
+    if (erroGuardar) throw erroGuardar;
+
+    const parceiro = Boolean(
+      (await supabase.from('driver_partners').select('id')
+        .eq('id', u.id).maybeSingle()).data
+    );
+
+    await sendResetCode({
+      email,
+      name: u.user_metadata?.full_name || null,
+      code: codigo,
+      partner: parceiro
+    });
+
+    console.log('[reset] código enviado para', email);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[reset] falhou para', email, e.message);
+
+    telegramTaskFailed('password reset',
+      `${email} pediu um código e falhou: ${e.message}`
+    ).catch(() => {});
+
+    return res.status(500).json({
+      error: 'We could not send the code. Try again in a moment.'
+    });
+  }
+});
+
+
+/**
+ * O código, trocado por uma palavra-passe nova.
+ */
+app.post('/api/account/reset-confirm', async (req, res) => {
+  if (limitar('resetconfirm', req, res, { max: 8, segundos: 900 })) return;
+
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const codigo = String(req.body?.code || '').trim();
+  const nova = String(req.body?.password || '');
+
+  if (!email || !codigo) {
+    return res.status(400).json({
+      error: 'Send the email and the code.', field_error: true
+    });
+  }
+
+  if (nova.length < 8) {
+    return res.status(400).json({
+      error: 'The password needs at least 8 characters.', field_error: true
+    });
+  }
+
+  try {
+    const { data: pedido } = await supabase
+      .from('password_resets')
+      .select('id, user_id, expires_at, used_at')
+      .eq('email', email)
+      .eq('code', codigo)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!pedido) {
+      return res.status(400).json({
+        error: 'That code is not right. Check it, or ask for a new one.',
+        field_error: true
+      });
+    }
+
+    if (pedido.used_at) {
+      return res.status(400).json({
+        error: 'That code was already used. Ask for a new one.',
+        field_error: true
+      });
+    }
+
+    if (new Date(pedido.expires_at) < new Date()) {
+      return res.status(400).json({
+        error: 'That code has expired. Ask for a new one.',
+        field_error: true
+      });
+    }
+
+    const { error } = await supabase.auth.admin.updateUserById(
+      pedido.user_id,
+      {
+        password: nova,
+
+        /**
+         * E o email fica confirmado.
+         *
+         * Quem recebeu o código naquele endereço provou que é dele.
+         * Deixá-lo por confirmar era bloquear o login logo a
+         * seguir a definir a palavra-passe.
+         */
+        email_confirm: true
+      }
+    );
+
+    if (error) throw error;
+
+    // O código não serve mais.
+    await supabase
+      .from('password_resets')
+      .update({ used_at: new Date().toISOString() })
+      .eq('id', pedido.id);
+
+    console.log('[reset] palavra-passe definida para', email);
+
+    sendPasswordChanged(email).catch(() => {});
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[reset-confirm]', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.post('/api/account/password', async (req, res) => {
   if (limitar('password', req, res, { max: 5, segundos: 900 })) return;
 
