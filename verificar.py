@@ -228,14 +228,6 @@ def recursao():
 PARES = [
     ('callcentre/public/assets/desk.js', 'callcentre/public/index.html'),
 
-    # O codigo destas paginas saiu do HTML para /assets/: cada
-    # visita descarregava 150 KB. Mas separa-los cria uma forma
-    # nova de errar — um $('algo') sobre um elemento que ja nao
-    # existe mata o script inteiro, e a pagina fica sem precos e
-    # sem moradas.
-    ('render-site/assets/home.js', 'render-site/index.html'),
-    ('render-site/assets/checkout.js', 'render-site/checkout/index.html'),
-    ('render-site/assets/booking.js', 'render-site/booking/index.html'),
 ]
 
 def ids_em_falta():
@@ -665,9 +657,9 @@ def variaveis_de_fora():
     """
     import re
 
-    for caminho in ['render-site/assets/home.js',
-                    'render-site/assets/booking.js',
-                    'render-site/assets/checkout.js']:
+    for caminho in ['render-site/index.html',
+                    'render-site/booking/index.html',
+                    'render-site/checkout/index.html']:
         texto = ler(caminho)
         if texto is None:
             continue
@@ -1056,8 +1048,8 @@ def tabelas_de_preco():
     # HTML: cada visita descarregava 150 KB. As tabelas foram com
     # ele, e esta verificação procurava no sítio antigo.
     paginas = {
-        'booking': 'render-site/assets/booking.js',
-        'checkout': 'render-site/assets/checkout.js',
+        'booking': 'render-site/booking/index.html',
+        'checkout': 'render-site/checkout/index.html',
     }
 
     for nome_tab in ['ES_ZONES', 'PT_ZONES', 'IT_ZONES',
@@ -1141,9 +1133,9 @@ def campos_inventados():
     """
     import re
 
-    for caminho in ['render-site/assets/checkout.js',
-                    'render-site/assets/booking.js',
-                    'render-site/assets/home.js']:
+    for caminho in ['render-site/checkout/index.html',
+                    'render-site/booking/index.html',
+                    'render-site/index.html']:
         texto = ler(caminho)
         if texto is None:
             continue
