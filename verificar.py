@@ -638,6 +638,204 @@ def rpc_com_catch():
                  'do Supabase nem sempre tem .catch — usa try/catch.')
 
 
+def variaveis_de_fora():
+    """
+    Uma variável usada numa função e declarada noutra.
+
+    No browser, cada id do documento cria uma variável global. Uma
+    função que usa "passengers" sem o declarar apanha o ELEMENTO
+    com esse id, não o número.
+
+    Foi assim que o preço deixou de mudar com os passageiros: o
+    multiplicador recebia um <input>.
+
+    Isto procura funções que usam um nome que também é um id do
+    HTML, sem o declararem.
+    """
+    import re
+
+    for caminho in ['render-site/index.html',
+                    'render-site/booking/index.html',
+                    'render-site/checkout/index.html']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        ids = set(re.findall(r'id="([a-zA-Z][\w-]*)"', texto))
+
+        # só os que são nomes de variável plausíveis
+        ids = {x for x in ids if re.fullmatch(r'[a-z][a-zA-Z]{3,}', x)}
+
+        if not ids:
+            continue
+
+        for m in re.finditer(r'function (\w+)\s*\([^)]*\)\s*\{', texto):
+            nome = m.group(1)
+            j = m.end() - 1
+
+            prof, k = 0, j
+            while k < len(texto):
+                if texto[k] == '{':
+                    prof += 1
+                elif texto[k] == '}':
+                    prof -= 1
+                    if prof == 0:
+                        break
+                k += 1
+
+            corpo = texto[j:k]
+
+            # sem comentários, para não apanhar prosa
+            corpo = re.sub(r'/\*[\s\S]*?\*/', '', corpo)
+            corpo = re.sub(r'//[^\n]*', '', corpo)
+
+            # E as strings: "up to 4 passengers" não é um uso da
+            # variável, é prosa. Sem isto, quase toda a função com
+            # texto visível dava um aviso.
+            corpo = re.sub(r"'(?:[^'\\]|\\.)*'", "''", corpo)
+            corpo = re.sub(r'"(?:[^"\\]|\\.)*"', '""', corpo)
+            corpo = re.sub(r'`(?:[^`\\]|\\.)*`', '``', corpo)
+
+            declaradas = set(re.findall(r'\b(?:var|let|const)\s+(\w+)', corpo))
+            declaradas |= set(re.findall(r'function \w+\s*\(([^)]*)\)', corpo)[0].split(',')) \
+                if re.search(r'function \w+\s*\(', corpo) else set()
+
+            # os parâmetros da própria função
+            params = set(x.strip() for x in
+                         (re.search(r'\(([^)]*)\)', m.group(0)).group(1) or '').split(','))
+
+            for id_ in ids:
+                if id_ in declaradas or id_ in params:
+                    continue
+
+                # usado como valor, não como string
+                if re.search(r'(?<![\w.\'"])' + re.escape(id_) + r'(?![\w\'"])\s*[,)\]*+\-]', corpo):
+                    aviso(caminho,
+                          f'{nome}() usa "{id_}" sem o declarar, e existe um '
+                          f'id="{id_}" no HTML — pode apanhar o elemento em '
+                          'vez do valor.')
+
+
+def promessas_sem_espera():
+    """
+    Uma função async chamada sem await nem .catch.
+
+    A promessa rejeita em silêncio, e o Node mata o processo nas
+    versões recentes. Um email que falha derruba o servidor.
+    """
+    import re
+
+    for caminho in ['server.js', 'server-drivers.js', 'support.js',
+                    'partners.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        # as funções async definidas no ficheiro
+        locais = set(re.findall(r'async function (\w+)', texto))
+
+        # e as importadas que sabemos serem async
+        locais |= set(re.findall(r'^\s+(telegram\w+|send\w+|notify\w+),',
+                                 texto, re.M))
+
+        for fn in locais:
+            for m in re.finditer(
+                r'(?<![\w.])' + re.escape(fn) + r'\([^;]{0,200}?\);', texto
+            ):
+                trecho = m.group(0)
+                antes = texto[max(0, m.start() - 30):m.start()]
+
+                if 'await' in antes or 'return' in antes:
+                    continue
+                if '.catch(' in trecho or '.then(' in trecho:
+                    continue
+
+                linha = texto[:m.start()].count('\n') + 1
+
+                aviso(caminho,
+                      f'linha {linha}: {fn}() chamada sem await nem .catch — '
+                      'uma rejeição não tratada pode derrubar o processo.')
+                break
+
+
+def numeros_magicos_de_preco():
+    """
+    Números da fórmula de preços escritos fora do precos.js.
+
+    Cada um é uma cópia à espera de divergir. A 10 de setembro
+    havia cinco, e quatro divergiram no mesmo dia.
+    """
+    import re
+
+    pr = ler('precos.js')
+    if pr is None:
+        return
+
+    # os números que aparecem nas fórmulas do precos.js
+    formulas = re.findall(r'Math\.max\(\d+,\s*\([^)]*\)', pr)
+
+    if not formulas:
+        return
+
+    paginas = [
+        'render-site/index.html',
+        'render-site/booking/index.html',
+        'render-site/checkout/index.html',
+        'render-site/seo/build-routes.js',
+    ]
+
+    com_formula = []
+
+    for caminho in paginas:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        if re.search(r'Math\.max\(2[45],\s*\(', texto):
+            com_formula.append(caminho)
+
+    if len(com_formula) > 1:
+        aviso('precos.js',
+              'a fórmula de preços está copiada em '
+              + str(len(com_formula)) + ' páginas: '
+              + ', '.join(com_formula)
+              + '. Cada cópia é uma que vai divergir — o servidor tem '
+                'uma rota /api/price que devia responder por todas.')
+
+
+def alarmes_ligados():
+    """
+    Uma função de alarme escrita e nunca chamada.
+
+    O telegramNewPartner existiu meses sem ser chamado: um parceiro
+    registava-se e ninguém sabia. Não dava erro nenhum.
+    """
+    import re
+
+    tg = ler('telegram.js')
+    if tg is None:
+        return
+
+    definidas = set(re.findall(r'export async function (telegram\w+)', tg))
+
+    usos = set()
+    for caminho in ['server.js', 'server-drivers.js', 'support.js',
+                    'partners.js', 'support-shared.js']:
+        texto = ler(caminho)
+        if texto:
+            usos |= set(re.findall(r'(telegram\w+)', texto))
+            # os que passam pelo notify
+            usos |= {'telegram' + x[0].upper() + x[1:]
+                     for x in re.findall(r'notify\.(\w+)', texto)}
+
+    orfas = definidas - usos - {'telegramTest'}
+
+    for fn in sorted(orfas):
+        erro('telegram.js',
+             f'{fn}() está definida e nunca é chamada — '
+             'um alarme que não dispara é o mesmo que não existir.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -656,6 +854,10 @@ def main():
         ('valores por omissão', valores_por_omissao),
         ('rotas sem proteção', rotas_sem_protecao),
         ('rpc com .catch', rpc_com_catch),
+        ('variáveis de fora', variaveis_de_fora),
+        ('promessas sem espera', promessas_sem_espera),
+        ('cópias da fórmula', numeros_magicos_de_preco),
+        ('alarmes ligados', alarmes_ligados),
     ]
 
     for nome, fn in testes:
