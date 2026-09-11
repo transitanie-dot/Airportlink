@@ -1073,6 +1073,44 @@ def tabelas_de_preco():
                      'valores). Um dos dois está errado.')
 
 
+def origens_permitidas():
+    """
+    Os domínios do projeto estão no CORS?
+
+    O portal dos motoristas chamou a API para definir a
+    palavra-passe e o browser recusou: drivers.airportlink.app não
+    estava na lista de origens.
+
+    O erro que se vê é "Failed to fetch", que não diz nada sobre a
+    causa.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    m = re.search(r'ALLOWED_ORIGINS\s*=\s*\[([\s\S]{0,900}?)\]', texto)
+
+    if not m:
+        aviso('server.js', 'não encontrei a lista ALLOWED_ORIGINS')
+        return
+
+    lista = m.group(1)
+
+    precisam = [
+        'drivers.airportlink.app',
+        'www.airportlink.app',
+    ]
+
+    for dominio in precisam:
+        if dominio not in lista:
+            erro('server.js',
+                 f'{dominio} não está nas origens permitidas. '
+                 'Os pedidos desse domínio são recusados e o browser '
+                 'diz "Failed to fetch".')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -1099,6 +1137,7 @@ def main():
         ('imports inexistentes', imports_que_nao_existem),
         ('botões de email', botoes_de_email),
         ('tabelas de preço', tabelas_de_preco),
+        ('origens do CORS', origens_permitidas),
     ]
 
     for nome, fn in testes:
