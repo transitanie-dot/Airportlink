@@ -1462,6 +1462,85 @@ export async function sendPartnerAccessLink({ email, name, company }) {
 }
 
 
+/**
+ * O código de seis dígitos para definir a palavra-passe.
+ *
+ * Não é um link: é um código que se escreve. Um link tem de
+ * apanhar a sessão do fragmento do endereço, expira em uma hora, e
+ * parte quando o email é aberto num telemóvel e a conta está no
+ * computador.
+ *
+ * Seis dígitos escrevem-se em qualquer lado.
+ */
+export async function sendResetCode({ email, name, code, partner }) {
+  try {
+    if (!email || !code) return { sent: false, reason: 'no-email-or-code' };
+
+    const primeiro = String(name || '').trim().split(/\s+/)[0];
+
+    const destino = partner
+      ? (process.env.DRIVERS_URL || 'https://drivers.airportlink.app') + '/'
+      : `${SITE}/login`;
+
+    const html = wrap({
+      preheader: 'Your code: ' + code,
+      heading: 'Your code',
+
+      intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
+             'Use this code to set a new password. It works for the next ' +
+             '30 minutes.',
+
+      blocks: [
+        {
+          /**
+           * O código grande, sozinho.
+           *
+           * É a única coisa que a pessoa precisa de tirar deste
+           * email. Enterrá-lo num parágrafo faz com que seja
+           * procurado duas vezes.
+           */
+          type: 'note',
+          html: `<div style="text-align:center;font:700 34px/1 'IBM Plex Mono',monospace;
+                 letter-spacing:.16em;color:#0F766E;padding:6px 0">${esc(code)}</div>`
+        },
+
+        {
+          type: 'note',
+          tone: 'warn',
+          text: 'If you did not ask for this, you can ignore it — ' +
+                'nothing changes until the code is used.'
+        }
+      ],
+
+      cta: {
+        label: 'Open the sign-in page',
+        href: destino
+      },
+
+      signOff: 'The Airportlink — Ops team'
+    });
+
+    return await sendOnce({
+      /**
+       * A chave leva o código.
+       *
+       * Cada pedido gera um código diferente, por isso cada um é
+       * um email diferente — e quem pedir dois em cinco minutos
+       * recebe os dois.
+       */
+      key: `reset:${email}:${code}`,
+      template: 'reset_code',
+      to: email,
+      subject: `${code} is your Airportlink code`,
+      html
+    });
+  } catch (error) {
+    console.error('sendResetCode failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendPasswordChanged(email) {
   try {
     if (!email) return { sent: false, reason: 'no-email' };
