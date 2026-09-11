@@ -1251,59 +1251,63 @@ export async function sendTicketReply(chat, mensagem, agente, opcoes) {
  * não motiva ninguém; "confirma e envia três documentos para
  * começares a receber viagens" motiva.
  */
-export async function sendVerifyPartner({ email, name, company, link }) {
+export async function sendVerifyPartner({ email, name, company }) {
   try {
-    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+    if (!email) return { sent: false, reason: 'no-email' };
 
     const primeiro = String(name || '').trim().split(/\s+/)[0];
 
+    const portal = (process.env.DRIVERS_URL
+      || 'https://drivers.airportlink.app') + '/';
+
     const html = wrap({
-      preheader: 'Confirm your email to finish signing up.',
-      heading: 'One click and you are in',
+      preheader: 'Your partner account is ready.',
+      heading: 'Your account is ready',
 
       intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
-             `Thanks for signing ${company ? esc(company) : 'your company'} up to ` +
-             'Airportlink. Confirm your email address and you can finish ' +
-             'setting up the account.',
+             `Your Airportlink partner account for ` +
+             `${company ? esc(company) : 'your company'} is active. ` +
+             'Sign in with the email and password you chose when you ' +
+             'registered.',
 
       blocks: [
         {
           type: 'note',
-          text: 'After confirming, there are three documents to upload: ' +
-                'your operating licence, your insurance, and a driver ' +
-                'licence. We check them within one working day, and you ' +
-                'start receiving rides as soon as they are approved.'
+          text: 'There are three documents to upload before you can ' +
+                'start: your operating licence, your insurance, and a ' +
+                'driver licence. We check them within one working day, ' +
+                'and you receive your first rides as soon as they are ' +
+                'approved.'
         }
       ],
 
+      /**
+       * O botão vai para a página de entrada, não para um link
+       * mágico.
+       *
+       * Um magiclink expira em uma hora. Quem abre o email à noite
+       * e clica de manhã encontra-o morto — e a mensagem do
+       * Supabase não explica nada.
+       *
+       * A página de entrada não expira, e quem se esqueceu da
+       * palavra-passe tem lá o "esqueci-me".
+       */
       cta: {
-        label: 'Confirm my email',
-        url: link
+        label: 'Sign in to the partner portal',
+        url: portal
       },
 
       signOff: 'The Airportlink — Ops team',
 
-      footNote: 'This link works once and expires in 24 hours. ' +
-                'If it does not work, write to us and we will send another.'
+      footNote: 'Forgot your password? There is a link on the sign-in ' +
+                'page, and it works right away.'
     });
 
     return await sendOnce({
-      /**
-       * A chave leva o dia.
-       *
-       * Uma chave fixa impedia qualquer segundo envio, para
-       * sempre. Mas um link de confirmação expira em 24 horas —
-       * quem não clicou a tempo ficava sem forma de entrar, e um
-       * reenvio devolvia "duplicate" em silêncio.
-       *
-       * Com o dia na chave, um por dia passa. Chega para reenviar
-       * quando é preciso e evita mandar cinco seguidos por
-       * engano.
-       */
       key: `verifypartner:${email}:${new Date().toISOString().slice(0, 10)}`,
       template: 'verify_partner',
       to: email,
-      subject: 'Confirm your email — Airportlink partners',
+      subject: 'Your Airportlink partner account is ready',
       html
     });
   } catch (error) {
@@ -1319,38 +1323,42 @@ export async function sendVerifyPartner({ email, name, company, link }) {
  * Mais curto do que o do parceiro: não há documentos a enviar nem
  * aprovação a esperar. Um clique e está feito.
  */
-export async function sendVerifyCustomer({ email, name, link }) {
+export async function sendVerifyCustomer({ email, name }) {
   try {
-    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+    if (!email) return { sent: false, reason: 'no-email' };
 
     const primeiro = String(name || '').trim().split(/\s+/)[0];
 
     const html = wrap({
-      preheader: 'Confirm your email address.',
-      heading: 'Confirm your email',
+      preheader: 'Your account is ready.',
+      heading: 'Your account is ready',
 
       intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
-             'One click and your Airportlink account is ready. ' +
-             'After this you can book, see your trips, and change a ' +
-             'booking without writing to anyone.',
+             'Your Airportlink account is active. Sign in with the email ' +
+             'and password you chose, and you can book, see your trips, ' +
+             'and change a booking without writing to anyone.',
 
+      /**
+       * Para a página de entrada, não para um link mágico.
+       *
+       * Um magiclink expira em uma hora. Esta página não expira, e
+       * quem se esqueceu da palavra-passe tem lá o "esqueci-me".
+       */
       cta: {
-        label: 'Confirm my email',
-        url: link
+        label: 'Sign in',
+        url: `${SITE}/login`
       },
 
       signOff: 'The Airportlink — Ops team',
 
-      footNote: 'This link works once and expires in 24 hours. ' +
-                'If you did not create an account, you can ignore this.'
+      footNote: 'Forgot your password? There is a link on the sign-in page.'
     });
 
     return await sendOnce({
-      // Um por dia, pela mesma razão do email de parceiro.
       key: `verifycustomer:${email}:${new Date().toISOString().slice(0, 10)}`,
       template: 'verify_customer',
       to: email,
-      subject: 'Confirm your email — Airportlink',
+      subject: 'Your Airportlink account is ready',
       html
     });
   } catch (error) {
