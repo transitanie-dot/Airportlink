@@ -1984,140 +1984,63 @@ async function ensureGuestAccount(email, name, phone) {
  * assim durante semanas, e nada disto dava erro: a função
  * devolvia { sent: true }.
  */
+/**
+ * O email que diz que a conta está pronta.
+ *
+ * Já não gera link mágico. Um magiclink expira em uma hora — quem
+ * abre o email à noite e clica de manhã encontra-o morto, e a
+ * mensagem do Supabase não explica nada.
+ *
+ * O parceiro escolheu uma palavra-passe ao registar-se. O que
+ * falta é dizer-lhe que a conta está ativa e onde entrar.
+ *
+ * A confirmação do email faz-se à parte: o admin.createUser cria
+ * a conta com email_confirm a false, e é isso que se corrige aqui
+ * antes de mandar o email.
+ */
 async function sendVerification(email, name, kind) {
   if (!email) return { sent: false, reason: 'no-email' };
 
   try {
     /**
-     * O link gerado pelo Supabase, enviado pelo Resend.
+     * Confirmar o email pelo lado do servidor.
      *
-     * O generateLink cria o token sem mandar email nenhum — o que
-     * nos deixa escrever o email como queremos, com o mesmo
-     * desenho dos outros.
+     * Sem isto, o Supabase recusa o login com "Email not
+     * confirmed" — e o parceiro fica de fora mesmo sabendo a
+     * palavra-passe.
+     *
+     * Confirmá-lo por ele é seguro: a conta foi criada com um
+     * endereço que ele escreveu, e o email que segue chega a esse
+     * endereço. Se não for dele, não recebe nada.
      */
-    const destino = kind === 'partner'
-      ? (process.env.DRIVERS_URL || 'https://drivers.airportlink.app') + '/?verified=1'
-      : `${SITE_ORIGIN}/login?verified=1`;
+    const { data: lista } = await supabase.auth.admin.listUsers();
 
-    /**
-     * O tipo "magiclink", não "signup".
-     *
-     * O signup é para contas que ainda não existem, e exige a
-     * palavra-passe para as criar. Aqui a conta já foi criada pelo
-     * admin.createUser — passar signup a um utilizador existente
-     * devolve um link que não funciona.
-     *
-     * O magiclink entra e confirma o email ao mesmo tempo. É o que
-     * queremos: a pessoa clica e está dentro.
-     */
-    const { data, error } = await supabase.auth.admin.generateLink({
-      type: 'magiclink',
-      email,
-      options: { redirectTo: destino }
-    });
+    const u = (lista?.users || []).find(
+      (x) => x.email?.toLowerCase() === email.toLowerCase()
+    );
 
-    if (error) throw error;
+    if (u && !u.email_confirmed_at) {
+      const { error: confErro } = await supabase.auth.admin.updateUserById(
+        u.id, { email_confirm: true }
+      );
 
-    /**
-     * O que o generateLink devolveu, por inteiro.
-     *
-     * O formato do action_link muda com a versão da API do
-     * Supabase — umas incluem o ?type=, outras não. Ver o objeto
-     * é mais rápido do que tentar formatos à vez.
-     */
-    console.log('[verify] properties:', JSON.stringify({
-      ...(data?.properties || {}),
-      hashed_token: data?.properties?.hashed_token
-        ? data.properties.hashed_token.slice(0, 10) + '…' : null
-    }));
-
-    let link = data?.properties?.action_link;
-
-    if (!link) throw new Error('generateLink devolveu sem action_link');
-
-    /**
-     * O type, que o action_link às vezes não traz.
-     *
-     * O Supabase responde 400 com "Verify requires a verification
-     * type" quando o endereço não tem ?type=. O action_link
-     * devolvido pelo generateLink nem sempre o inclui — depende da
-     * versão da API.
-     *
-     * O properties traz o hashed_token e o verification_type em
-     * separado, e com eles monta-se o endereço à mão.
-     */
-    try {
-      const u = new URL(link);
-
-      if (!u.searchParams.get('type')) {
-        const tipo = data?.properties?.verification_type
-          || (kind === 'partner' ? 'magiclink' : 'magiclink');
-
-        u.searchParams.set('type', tipo);
-
-        // O token tem de ser o hashed_token quando se monta à mão.
-        const hashed = data?.properties?.hashed_token;
-        if (hashed) u.searchParams.set('token', hashed);
-
-        if (!u.searchParams.get('redirect_to')) {
-          u.searchParams.set('redirect_to', destino);
-        }
-
-        link = u.toString();
+      if (confErro) {
+        console.error('[verify] não consegui confirmar', email, confErro.message);
+      } else {
+        console.log('[verify] email confirmado para', email);
       }
-    } catch (e) {
-      console.error('[verify] não consegui completar o link:', e.message);
-    }
-
-    /**
-     * O link, escrito no registo.
-     *
-     * Um link que não funciona não diz porquê ao clicar: o
-     * Supabase mostra "invalid or expired" para três causas
-     * diferentes — tipo errado, redirectTo não autorizado, ou
-     * token já usado.
-     *
-     * Ver o endereço gerado distingue-as em segundos.
-     */
-    /**
-     * O link, partido nas partes que interessam.
-     *
-     * Cortá-lo a 120 caracteres escondia justamente o
-     * redirect_to, que é a causa mais provável de um link que não
-     * funciona.
-     *
-     * O token vai cortado de propósito: é um segredo de uso único
-     * e não faz falta para diagnosticar.
-     */
-    try {
-      const u = new URL(link);
-
-      console.log('[verify]', email,
-        '| projeto:', u.hostname,
-        '| tipo:', u.searchParams.get('type') || '(sem type)',
-        '| redirect_to:', u.searchParams.get('redirect_to') || '(nenhum)',
-        '| token:', (u.searchParams.get('token') || '').slice(0, 8) + '…');
-    } catch {
-      console.log('[verify]', email, '| link mal formado:', link.slice(0, 80));
     }
 
     if (kind === 'partner') {
-      return await sendVerifyPartner({ email, name, link });
+      return await sendVerifyPartner({ email, name });
     }
 
-    return await sendVerifyCustomer({ email, name, link });
+    return await sendVerifyCustomer({ email, name });
   } catch (e) {
-    console.error('[email] verification failed for', email, e.message);
+    console.error('[verify] falhou para', email, e.message);
 
-    /**
-     * Isto avisa, e devia ter avisado desde o início.
-     *
-     * Uma conta que não recebe o email de confirmação é uma conta
-     * perdida — e é impossível saber quantas se perderam assim.
-     */
     telegramTaskFailed('verification email',
-      `${email} (${kind}) did not get the confirmation email: ${e.message}. ` +
-      'They cannot sign in.'
+      `${email} (${kind}) não recebeu o email: ${e.message}.`
     ).catch(() => {});
 
     return { sent: false, reason: e.message };
