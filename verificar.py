@@ -994,6 +994,85 @@ def botoes_de_email():
                  f'linha {linha}: um botão de email com endereço vazio.')
 
 
+def tabelas_de_preco():
+    """
+    As tabelas de preço são as mesmas em todo o lado?
+
+    O servidor tinha tarifas italianas e as páginas não — uma rota
+    em Roma mostrava 172 euros e era cobrada a 94. Não dava erro
+    nenhum: cada lado calculava com o que tinha.
+
+    Isto compara os NÚMEROS de cada tabela. Uma tabela reescrita
+    de outra maneira mas com os mesmos valores passa; uma que
+    falte, ou com um número diferente, não passa.
+    """
+    import re
+
+    def tabela(texto, nome):
+        m = re.search(r'(?:const |var )?' + nome + r'\s*=\s*([\[{])', texto)
+        if not m:
+            return None
+
+        abre = m.group(1)
+        fecha = ']' if abre == '[' else '}'
+        i = texto.index(abre, m.start())
+        prof, k = 0, i
+
+        while k < len(texto):
+            if texto[k] == abre:
+                prof += 1
+            elif texto[k] == fecha:
+                prof -= 1
+                if prof == 0:
+                    break
+            k += 1
+
+        bloco = texto[i:k+1]
+
+        # As strings saem: os acentos escapados (\u00fa) traziam
+        # dígitos que não são preços, e faziam a comparação falhar
+        # em tabelas idênticas.
+        bloco = re.sub(r"'(?:[^'\\]|\\.)*'", "''", bloco)
+        bloco = re.sub(r'"(?:[^"\\]|\\.)*"', '""', bloco)
+
+        return re.findall(r'\d+\.?\d*', bloco)
+
+    fonte = ler('precos.js')
+    if fonte is None:
+        return
+
+    paginas = {
+        'booking': 'render-site/booking/index.html',
+        'checkout': 'render-site/checkout/index.html',
+    }
+
+    for nome_tab in ['ES_ZONES', 'PT_ZONES', 'IT_ZONES',
+                     'ES_FALLBACK', 'PT_FALLBACK', 'IT_FALLBACK']:
+        na_fonte = tabela(fonte, nome_tab)
+
+        if na_fonte is None:
+            continue
+
+        for nome_pag, caminho in paginas.items():
+            texto = ler(caminho)
+            if texto is None:
+                continue
+
+            na_pagina = tabela(texto, nome_tab)
+
+            if na_pagina is None:
+                erro(caminho,
+                     f'não tem a tabela {nome_tab}, que o precos.js tem. '
+                     'A página calcula um preço e o servidor cobra outro.')
+                continue
+
+            if na_pagina != na_fonte:
+                erro(caminho,
+                     f'a tabela {nome_tab} tem números diferentes do '
+                     f'precos.js ({len(na_pagina)} vs {len(na_fonte)} '
+                     'valores). Um dos dois está errado.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -1019,6 +1098,7 @@ def main():
         ('imports entre serviços', imports_entre_servicos),
         ('imports inexistentes', imports_que_nao_existem),
         ('botões de email', botoes_de_email),
+        ('tabelas de preço', tabelas_de_preco),
     ]
 
     for nome, fn in testes:
