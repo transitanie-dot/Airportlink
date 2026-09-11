@@ -1999,8 +1999,19 @@ async function sendVerification(email, name, kind) {
       ? (process.env.DRIVERS_URL || 'https://drivers.airportlink.app') + '/?verified=1'
       : `${SITE_ORIGIN}/login?verified=1`;
 
+    /**
+     * O tipo "magiclink", não "signup".
+     *
+     * O signup é para contas que ainda não existem, e exige a
+     * palavra-passe para as criar. Aqui a conta já foi criada pelo
+     * admin.createUser — passar signup a um utilizador existente
+     * devolve um link que não funciona.
+     *
+     * O magiclink entra e confirma o email ao mesmo tempo. É o que
+     * queremos: a pessoa clica e está dentro.
+     */
     const { data, error } = await supabase.auth.admin.generateLink({
-      type: 'signup',
+      type: 'magiclink',
       email,
       options: { redirectTo: destino }
     });
@@ -2010,6 +2021,18 @@ async function sendVerification(email, name, kind) {
     const link = data?.properties?.action_link;
 
     if (!link) throw new Error('generateLink devolveu sem action_link');
+
+    /**
+     * O link, escrito no registo.
+     *
+     * Um link que não funciona não diz porquê ao clicar: o
+     * Supabase mostra "invalid or expired" para três causas
+     * diferentes — tipo errado, redirectTo não autorizado, ou
+     * token já usado.
+     *
+     * Ver o endereço gerado distingue-as em segundos.
+     */
+    console.log('[verify] link para', email, ':', link.slice(0, 120));
 
     if (kind === 'partner') {
       return await sendVerifyPartner({ email, name, link });
@@ -6886,6 +6909,63 @@ app.post('/api/internal/alert', async (req, res) => {
 });
 
 
+/**
+ * ---------------------------------------------------------------
+ * MANDAR UM EMAIL DE TESTE A UM ENDEREÇO
+ *
+ * Sem passar pela tabela de parceiros. Serve para ver se o link
+ * funciona antes de o mandar a nove pessoas — que foi o que
+ * faltou fazer à primeira.
+ *
+ *   /api/tasks/test-verify?email=x@y.com&kind=partner
+ * ---------------------------------------------------------------
+ */
+app.get('/api/tasks/test-verify', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const email = String(req.query.email || '').trim();
+  const kind = req.query.kind === 'customer' ? 'customer' : 'partner';
+
+  if (!email) {
+    return res.status(400).json({ error: 'Manda ?email=' });
+  }
+
+  try {
+    /**
+     * A conta tem de existir.
+     *
+     * O generateLink cria um token para um utilizador; se ele não
+     * existir, devolve um erro que não diz isso claramente.
+     */
+    const { data: lista } = await supabase.auth.admin.listUsers();
+    const existe = (lista?.users || []).find(
+      (u) => u.email?.toLowerCase() === email.toLowerCase()
+    );
+
+    if (!existe) {
+      return res.status(404).json({
+        error: `Não há conta com ${email}. O generateLink precisa de uma.`
+      });
+    }
+
+    const r = await sendVerification(email, req.query.name || null, kind);
+
+    return res.json({
+      ...r,
+      email,
+      kind,
+      confirmado: Boolean(existe.email_confirmed_at),
+      nota: 'O link vai no registo do Render, procura por [verify]'
+    });
+  } catch (e) {
+    console.error('test-verify:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.get('/api/tasks/resend-verification', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     /**
@@ -6920,6 +7000,17 @@ app.get('/api/tasks/resend-verification', async (req, res) => {
 
   const ensaio = req.query.dry === '1';
 
+  /**
+   * Um só, para testar.
+   *
+   * ?only=alguem@exemplo.com manda a esse e salta os outros.
+   *
+   * Testar num de cada vez vale mais do que mandar nove e
+   * descobrir que o link não funciona — foi o que aconteceu à
+   * primeira.
+   */
+  const apenas = String(req.query.only || '').trim().toLowerCase();
+
   try {
     /**
      * Os parceiros que ainda não confirmaram.
@@ -6940,6 +7031,9 @@ app.get('/api/tasks/resend-verification', async (req, res) => {
 
     for (const p of (parceiros || [])) {
       if (!p.email) continue;
+
+      // Com ?only=, os outros ficam de fora.
+      if (apenas && p.email.toLowerCase() !== apenas) continue;
 
       /**
        * Já confirmou?
@@ -7027,7 +7121,7 @@ app.get('/api/tasks/resend-verification', async (req, res) => {
 
     console.log('[resend-verification]', JSON.stringify(out));
 
-    return res.json({ ...out, ensaio });
+    return res.json({ ...out, ensaio, apenas: apenas || null });
   } catch (e) {
     console.error('resend-verification:', e.message);
     return res.status(500).json({ error: e.message });
