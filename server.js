@@ -7083,74 +7083,30 @@ app.get('/api/tasks/resend-verification', async (req, res) => {
        */
       const { data: u } = await supabase.auth.admin.getUserById(p.id);
 
-      if (u?.user?.email_confirmed_at) {
-        /**
-         * Já confirmado, mas provavelmente à mão.
-         *
-         * Se correste o SQL de recuperação, o email ficou marcado
-         * como confirmado — e um link de confirmação já não serve
-         * de nada.
-         *
-         * O que estas pessoas precisam é de definir a
-         * palavra-passe. O link de recuperação faz isso, e dá-lhes
-         * uma forma de entrar.
-         *
-         * Acrescenta ?recover=1 para mandar estes em vez de os
-         * saltar.
-         */
-        if (req.query.recover === '1' && !ensaio) {
-          try {
-            const { data: rec } = await supabase.auth.admin.generateLink({
-              type: 'recovery',
-              email: p.email,
-              options: {
-                redirectTo: (process.env.DRIVERS_URL ||
-                  'https://drivers.airportlink.app') + '/?recovered=1'
-              }
-            });
-
-            const link = rec?.properties?.action_link;
-
-            if (link) {
-              await sendPartnerAccessLink({
-                email: p.email,
-                name: p.contact_name,
-                company: p.trading_name || p.legal_name,
-                link
-              });
-
-              out.enviados += 1;
-              out.lista.push({ email: p.email, estado: 'link de acesso enviado' });
-            }
-          } catch (e2) {
-            out.falhas.push({ email: p.email, porque: e2.message });
-          }
-
-          await new Promise((r3) => setTimeout(r3, 500));
-          continue;
-        }
-
-        out.lista.push({ email: p.email, estado: 'já confirmado' });
-        continue;
-      }
-
-      if (ensaio) {
-        out.lista.push({ email: p.email, estado: 'ia receber' });
-        continue;
-      }
-
       /**
-       * O email de acesso, não o de registo.
+       * O email confirmado não quer dizer que ele consiga entrar.
        *
-       * Quem se regista hoje sabe a palavra-passe que acabou de
-       * escolher, e recebe o email que diz "entra".
+       * A lógica antiga saltava quem já tinha o email confirmado,
+       * e mandava o link só aos outros. Mas confirmar o email é
+       * uma coisa e saber a palavra-passe é outra.
        *
-       * Estes registaram-se há semanas e nunca receberam nada. Já
-       * não se lembram de nada — o que precisam é de definir uma
-       * palavra-passe nova.
+       * Estes registaram-se há semanas e nunca receberam nada.
+       * Confirmado ou não, o que precisam é do mesmo: um email a
+       * dizer que a conta existe e como definir a palavra-passe.
        *
-       * Dois grupos, dois emails.
+       * Um email a mais a quem já entrou é ruído. Nenhum email a
+       * quem não consegue entrar é um parceiro perdido.
        */
+      if (ensaio) {
+        out.lista.push({
+          email: p.email,
+          estado: u?.user?.email_confirmed_at
+            ? 'ia receber (email já confirmado)'
+            : 'ia receber'
+        });
+        continue;
+      }
+
       await confirmarEmailDe(p.id, p.email);
 
       const r = await sendPartnerAccessLink({
