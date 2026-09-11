@@ -1237,6 +1237,116 @@ export async function sendTicketReply(chat, mensagem, agente, opcoes) {
  * de recuperar a conta. Uma mudança em silêncio é a última coisa
  * que um dono de conta quer.
  */
+/**
+ * Confirmar o email, para um parceiro que acabou de se registar.
+ *
+ * Sem isto, ele regista-se e não recebe nada: o admin.createUser
+ * não manda email, ao contrário do signUp. Não consegue entrar, e
+ * não entrando não envia os documentos.
+ *
+ * Era por isso que havia registos e nenhuma conta chegava a ser
+ * validada.
+ *
+ * O email diz o que vem a seguir. "Confirma o teu email" sozinho
+ * não motiva ninguém; "confirma e envia três documentos para
+ * começares a receber viagens" motiva.
+ */
+export async function sendVerifyPartner({ email, name, company, link }) {
+  try {
+    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+
+    const primeiro = String(name || '').trim().split(/\s+/)[0];
+
+    const html = wrap({
+      preheader: 'Confirm your email to finish signing up.',
+      heading: 'One click and you are in',
+
+      intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
+             `Thanks for signing ${company ? esc(company) : 'your company'} up to ` +
+             'Airportlink. Confirm your email address and you can finish ' +
+             'setting up the account.',
+
+      blocks: [
+        {
+          type: 'note',
+          text: 'After confirming, there are three documents to upload: ' +
+                'your operating licence, your insurance, and a driver ' +
+                'licence. We check them within one working day, and you ' +
+                'start receiving rides as soon as they are approved.'
+        }
+      ],
+
+      cta: {
+        label: 'Confirm my email',
+        url: link
+      },
+
+      signOff: 'The Airportlink — Ops team',
+
+      footNote: 'This link works once and expires in 24 hours. ' +
+                'If it does not work, write to us and we will send another.'
+    });
+
+    return await sendOnce({
+      key: `verifypartner:${email}`,
+      template: 'verify_partner',
+      to: email,
+      subject: 'Confirm your email — Airportlink partners',
+      html
+    });
+  } catch (error) {
+    console.error('sendVerifyPartner failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
+/**
+ * Confirmar o email, para um cliente.
+ *
+ * Mais curto do que o do parceiro: não há documentos a enviar nem
+ * aprovação a esperar. Um clique e está feito.
+ */
+export async function sendVerifyCustomer({ email, name, link }) {
+  try {
+    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+
+    const primeiro = String(name || '').trim().split(/\s+/)[0];
+
+    const html = wrap({
+      preheader: 'Confirm your email address.',
+      heading: 'Confirm your email',
+
+      intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
+             'One click and your Airportlink account is ready. ' +
+             'After this you can book, see your trips, and change a ' +
+             'booking without writing to anyone.',
+
+      cta: {
+        label: 'Confirm my email',
+        url: link
+      },
+
+      signOff: 'The Airportlink — Ops team',
+
+      footNote: 'This link works once and expires in 24 hours. ' +
+                'If you did not create an account, you can ignore this.'
+    });
+
+    return await sendOnce({
+      key: `verifycustomer:${email}`,
+      template: 'verify_customer',
+      to: email,
+      subject: 'Confirm your email — Airportlink',
+      html
+    });
+  } catch (error) {
+    console.error('sendVerifyCustomer failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendPasswordChanged(email) {
   try {
     if (!email) return { sent: false, reason: 'no-email' };
