@@ -836,6 +836,54 @@ def alarmes_ligados():
              'um alarme que não dispara é o mesmo que não existir.')
 
 
+def imports_entre_servicos():
+    """
+    Um ficheiro de um serviço importado pelo outro.
+
+    Os dois serviços vivem em repositórios separados. O
+    telegram.js está no da API; o server-drivers.js importou-o e o
+    Render rebentou no arranque com ERR_MODULE_NOT_FOUND.
+
+    O serviço não subia de todo — e isso não aparece em nenhum
+    teste local, porque na pasta de trabalho os ficheiros estão
+    todos juntos.
+
+    Estes são os ficheiros que SÓ existem no repositório da API.
+    """
+    import re
+
+    so_na_api = {
+        'telegram.js',
+        'emailService.js',
+        'calendar.js',
+        'flights.js',
+        'precos.js',
+        'testar-precos.js',
+    }
+
+    do_drivers = [
+        'server-drivers.js', 'partners.js', 'support.js',
+        'support-shared.js', 'emailclient.js', 'supabaseclient.js',
+    ]
+
+    for caminho in do_drivers:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for m in re.finditer(r"from '\./([\w.-]+)'", texto):
+            alvo = m.group(1)
+
+            if alvo in so_na_api:
+                linha = texto[:m.start()].count('\n') + 1
+
+                erro(caminho,
+                     f'linha {linha}: importa {alvo}, que vive no repositório '
+                     'da API. O Render rebenta no arranque com '
+                     'ERR_MODULE_NOT_FOUND e o serviço não sobe. '
+                     'Pede à API por uma rota interna.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -858,6 +906,7 @@ def main():
         ('promessas sem espera', promessas_sem_espera),
         ('cópias da fórmula', numeros_magicos_de_preco),
         ('alarmes ligados', alarmes_ligados),
+        ('imports entre serviços', imports_entre_servicos),
     ]
 
     for nome, fn in testes:
