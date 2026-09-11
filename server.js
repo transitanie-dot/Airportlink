@@ -1998,6 +1998,43 @@ async function ensureGuestAccount(email, name, phone) {
  * a conta com email_confirm a false, e é isso que se corrige aqui
  * antes de mandar o email.
  */
+/**
+ * Confirmar o email pelo lado do servidor.
+ *
+ * O admin.createUser cria a conta com email_confirm a false, e
+ * sem isto o Supabase recusa o login com "Email not confirmed" —
+ * o parceiro fica de fora mesmo sabendo a palavra-passe.
+ *
+ * É seguro: a conta foi criada com um endereço que ele escreveu,
+ * e o email que segue chega a esse endereço. Se não for dele, não
+ * recebe nada.
+ */
+async function confirmarEmailDe(userId, email) {
+  try {
+    if (!userId) return false;
+
+    const { data } = await supabase.auth.admin.getUserById(userId);
+
+    if (data?.user?.email_confirmed_at) return true;
+
+    const { error } = await supabase.auth.admin.updateUserById(
+      userId, { email_confirm: true }
+    );
+
+    if (error) {
+      console.error('[verify] não consegui confirmar', email, error.message);
+      return false;
+    }
+
+    console.log('[verify] email confirmado para', email);
+    return true;
+  } catch (e) {
+    console.error('[verify] confirmar falhou:', e.message);
+    return false;
+  }
+}
+
+
 async function sendVerification(email, name, kind) {
   if (!email) return { sent: false, reason: 'no-email' };
 
@@ -7102,7 +7139,25 @@ app.get('/api/tasks/resend-verification', async (req, res) => {
         continue;
       }
 
-      const r = await sendVerification(p.email, p.contact_name, 'partner');
+      /**
+       * O email de acesso, não o de registo.
+       *
+       * Quem se regista hoje sabe a palavra-passe que acabou de
+       * escolher, e recebe o email que diz "entra".
+       *
+       * Estes registaram-se há semanas e nunca receberam nada. Já
+       * não se lembram de nada — o que precisam é de definir uma
+       * palavra-passe nova.
+       *
+       * Dois grupos, dois emails.
+       */
+      await confirmarEmailDe(p.id, p.email);
+
+      const r = await sendPartnerAccessLink({
+        email: p.email,
+        name: p.contact_name,
+        company: p.trading_name || p.legal_name
+      });
 
       if (r?.sent) {
         out.enviados += 1;
