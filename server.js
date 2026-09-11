@@ -99,6 +99,11 @@ import {
   sendTicketReply,
   sendDeletionConfirm,
   sendPasswordChanged,
+
+  // Os emails de confirmação de conta. O registo de parceiros
+  // ficou semanas sem os mandar.
+  sendVerifyPartner,
+  sendVerifyCustomer,
   sendCancellation,
   sendDriverDetails,
   sendAgentDecision,
@@ -1956,10 +1961,70 @@ async function ensureGuestAccount(email, name, phone) {
  * sozinho. Esta função existe para o registo de parceiros a poder
  * chamar sem saber disto.
  */
+/**
+ * O email de confirmação de conta.
+ *
+ * Esta função não fazia nada. O comentário dizia "o Supabase já
+ * enviou quando a conta foi criada" — e isso é verdade para o
+ * signUp, mas NÃO para o admin.createUser, que é o que o registo
+ * de parceiros usa.
+ *
+ * Resultado: o parceiro registava-se, ficava com email_confirm a
+ * false, não recebia nada, e não conseguia entrar para enviar os
+ * documentos.
+ *
+ * Havia registos e nenhuma conta chegava a ser validada. Foi
+ * assim durante semanas, e nada disto dava erro: a função
+ * devolvia { sent: true }.
+ */
 async function sendVerification(email, name, kind) {
-  // Nada a fazer: o Supabase já enviou quando a conta foi criada.
-  console.log(`[email] verification for ${email} (${kind}) handled by Supabase`);
-  return { sent: true, by: 'supabase' };
+  if (!email) return { sent: false, reason: 'no-email' };
+
+  try {
+    /**
+     * O link gerado pelo Supabase, enviado pelo Resend.
+     *
+     * O generateLink cria o token sem mandar email nenhum — o que
+     * nos deixa escrever o email como queremos, com o mesmo
+     * desenho dos outros.
+     */
+    const destino = kind === 'partner'
+      ? (process.env.DRIVERS_URL || 'https://drivers.airportlink.app') + '/?verified=1'
+      : `${SITE_ORIGIN}/login?verified=1`;
+
+    const { data, error } = await supabase.auth.admin.generateLink({
+      type: 'signup',
+      email,
+      options: { redirectTo: destino }
+    });
+
+    if (error) throw error;
+
+    const link = data?.properties?.action_link;
+
+    if (!link) throw new Error('generateLink devolveu sem action_link');
+
+    if (kind === 'partner') {
+      return await sendVerifyPartner({ email, name, link });
+    }
+
+    return await sendVerifyCustomer({ email, name, link });
+  } catch (e) {
+    console.error('[email] verification failed for', email, e.message);
+
+    /**
+     * Isto avisa, e devia ter avisado desde o início.
+     *
+     * Uma conta que não recebe o email de confirmação é uma conta
+     * perdida — e é impossível saber quantas se perderam assim.
+     */
+    telegramTaskFailed('verification email',
+      `${email} (${kind}) did not get the confirmation email: ${e.message}. ` +
+      'They cannot sign in.'
+    ).catch(() => {});
+
+    return { sent: false, reason: e.message };
+  }
 }
 
 app.post('/api/payment-options', async (req, res) => {
