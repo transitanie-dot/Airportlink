@@ -2298,7 +2298,21 @@ app.get('/api/price', async (req, res) => {
       vehicleClass: req.query.vehicle || null,
       pickupText: de,
       dropoffText: para,
-      pickupTime: req.query.time || null
+      pickupTime: req.query.time || null,
+
+      /**
+       * A cidade e o país, ditos pelo Google.
+       *
+       * O browser guarda-os do address_components quando a pessoa
+       * escolhe a morada. Adivinhar pelo texto é o que dava a
+       * tarifa de Barcelona a uma rua em Ibiza.
+       */
+      pickupCity: req.query.from_city || null,
+      dropoffCity: req.query.to_city || null,
+      pickupCountry: req.query.from_country || null,
+      dropoffCountry: req.query.to_country || null,
+      pickupRegion: req.query.from_region || null,
+      dropoffRegion: req.query.to_region || null
     });
 
     return res.json({
@@ -2783,6 +2797,18 @@ async function criarSessaoCheckout(req, res) {
       pickupText: booking.pickup,
       dropoffText: booking.dropoff,
 
+      /**
+       * A cidade e o país, quando o site os enviou.
+       *
+       * Vêm do address_components do Google. Sem eles, o cálculo
+       * cai no texto — que continua a funcionar para as reservas
+       * antigas e para o call centre.
+       */
+      pickupCity: booking.pickup_city || null,
+      dropoffCity: booking.dropoff_city || null,
+      pickupCountry: booking.pickup_country || null,
+      dropoffCountry: booking.dropoff_country || null,
+
       // A hora decide o suplemento noturno: 20% entre as 22h55 e
       // as 6h.
       pickupTime: booking.booking_time || booking.time
@@ -2955,11 +2981,17 @@ async function criarSessaoCheckout(req, res) {
   // A taxa fica registada na reserva. Converter mais tarde com a taxa
   // do dia em que se lê o relatório dava números diferentes a cada
   // consulta, e nenhum deles seria o que realmente aconteceu.
-  // País de recolha e de destino, a partir do texto. Grosseiro mas
-  // suficiente: serve para separar viagens internas de transfronteiriças,
-  // que é a distinção que quase todos os regimes fazem.
-  const countryFrom = guessCountry(booking.pickup);
-  const countryTo = guessCountry(booking.dropoff);
+  /**
+   * O país, dito pelo Google quando o temos.
+   *
+   * O browser guarda o country do address_components — ES, PT, IT
+   * — no momento em que a pessoa escolhe a morada.
+   *
+   * O guessCountry adivinha pelo texto, e fica como rede: as
+   * reservas do call centre e as antigas não trazem o campo.
+   */
+  const countryFrom = booking.pickup_country || guessCountry(booking.pickup);
+  const countryTo = booking.dropoff_country || guessCountry(booking.dropoff);
 
   const rateData = await loadExchangeRates();
   const fxRate = Number((rateData.rates || {})[String(currency).toUpperCase()] || 1);
@@ -3012,6 +3044,16 @@ async function criarSessaoCheckout(req, res) {
     return_price_eur: ret ? String(returnNetEUR.toFixed(2)) : '',
     country_from: countryFrom || '',
     country_to: countryTo || '',
+
+    /**
+     * A cidade da morada, dita pelo Google.
+     *
+     * Diferente do pickup_city, que é a cidade do AEROPORTO. Esta
+     * é a da morada que a pessoa escreveu — e é a que decide a
+     * zona de preço.
+     */
+    pickup_locality: booking.pickup_city || '',
+    dropoff_locality: booking.dropoff_city || '',
     // Só faz sentido numa reserva de agência, e só o servidor sabe
     // se quem reserva é mesmo uma. Vem do JWT, não do que o browser
     // diz que é.
@@ -3271,6 +3313,12 @@ async function repairBookingFromSession(session) {
     fx_rate_at: new Date().toISOString(),
     pickup_airport: metadata.pickup_airport || null,
     pickup_city: metadata.pickup_city || null,
+
+    // A cidade da morada, que decide a zona de preço. Diferente
+    // do pickup_city, que é a do aeroporto.
+    pickup_locality: metadata.pickup_locality || null,
+    dropoff_locality: metadata.dropoff_locality || null,
+
     country_from: metadata.country_from || null,
     country_to: metadata.country_to || null,
     cross_border: metadata.country_from && metadata.country_to
