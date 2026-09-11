@@ -1396,47 +1396,63 @@ export async function sendVerifyCustomer({ email, name }) {
  * Diz o que interessa: a conta existe, define a palavra-passe,
  * e estes são os documentos.
  */
-export async function sendPartnerAccessLink({ email, name, company, link }) {
+export async function sendPartnerAccessLink({ email, name, company }) {
   try {
-    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+    if (!email) return { sent: false, reason: 'no-email' };
 
     const primeiro = String(name || '').trim().split(/\s+/)[0];
 
+    const portal = (process.env.DRIVERS_URL
+      || 'https://drivers.airportlink.app') + '/';
+
     const html = wrap({
-      preheader: 'Set your password and finish signing up.',
-      heading: 'Your account is ready',
+      preheader: 'Set a password and sign in.',
+      heading: 'Your account is waiting',
 
       intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
              `Your Airportlink partner account for ` +
-             `${company ? esc(company) : 'your company'} is ready. ` +
-             'Set a password and you can finish setting it up.',
+             `${company ? esc(company) : 'your company'} is active and ` +
+             'ready to use. Set a password to sign in for the first time.',
 
       blocks: [
         {
           type: 'note',
-          text: 'Set a password with the button below and you are in. ' +
-                'Then there are three documents to upload: your operating ' +
-                'licence, your insurance, and a driver licence. We check ' +
-                'them within one working day.'
+          text: 'Once you are in, there are three documents to upload: ' +
+                'your operating licence, your insurance, and a driver ' +
+                'licence. We check them within one working day, and you ' +
+                'receive your first rides as soon as they are approved.'
         }
       ],
 
+      /**
+       * Para o "esqueci-me", com o email já preenchido.
+       *
+       * Não é um link mágico: esses expiram em uma hora, e quem
+       * abre o email à noite e clica de manhã encontra-o morto.
+       *
+       * A página de recuperação não expira. O parceiro escreve o
+       * email — já lá está — e recebe um link novo na hora.
+       *
+       * Este email é só para quem se registou há semanas e nunca
+       * recebeu nada. Quem se regista hoje sabe a palavra-passe
+       * que acabou de escolher, e recebe outro email.
+       */
       cta: {
         label: 'Set my password',
-        url: link
+        href: portal + '?forgot=' + encodeURIComponent(email)
       },
 
       signOff: 'The Airportlink — Ops team',
 
-      footNote: 'This link works once and expires in 24 hours. ' +
-                'If it does not work, write to us and we will send another.'
+      footNote: 'The button takes you to the sign-in page, where you can ' +
+                'set a password with the email you registered.'
     });
 
     return await sendOnce({
-      key: `access:${email}:${Date.now()}`,
+      key: `access:${email}:${new Date().toISOString().slice(0, 10)}`,
       template: 'partner_access',
       to: email,
-      subject: 'Your Airportlink partner account is ready',
+      subject: 'Set a password for your Airportlink account',
       html
     });
   } catch (error) {
