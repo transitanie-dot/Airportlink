@@ -847,23 +847,6 @@ export async function telegramReservaIncompleta(reserva, faltam) {
 }
 
 
-/**
- * Um deploy aconteceu.
- *
- * Não é um erro — mas quando algo parte, a primeira pergunta é
- * sempre "o que mudou?". Um aviso a dizer que o serviço arrancou
- * dá a resposta sem ter de a procurar.
- */
-export async function telegramArranque(servico) {
-  return send(ALERTS, [
-    '🚀 *Deployed*',
-    '',
-    `${esc(servico)} is back up\\.`,
-    `_${esc(new Date().toISOString().slice(0, 16).replace('T', ' '))}_`
-  ].join('\n'), { silent: true });
-}
-
-
 /** O trabalho de fundo parou. */
 export async function telegramTickDown(minutes) {
   return send(ALERTS, [
@@ -987,3 +970,4 @@ export async function telegramTest() {
     failures: falhas.length ? falhas : null
   };
 }
+
