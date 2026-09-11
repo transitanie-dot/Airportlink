@@ -176,15 +176,86 @@ function routeOverride(zoneName, dropoffText) {
   return null;
 }
 
+/**
+ * Os nomes de rua não dizem a cidade.
+ *
+ * Uma morada em Ibiza — "Hotel Ibiza Playa, Carrer de Tarragona,
+ * Eivissa" — tem a palavra "Tarragona" numa RUA. O sistema lia-a
+ * e aplicava a tarifa de Barcelona: 56 euros em vez de 73.
+ *
+ * Espanha, Portugal e Itália têm ruas com nomes de outras
+ * cidades em quase todas as localidades. Sem isto, é uma questão
+ * de tempo até voltar a acontecer.
+ *
+ * A parte antes da primeira vírgula é o nome do sítio e a rua. A
+ * cidade vem depois.
+ */
+const PREFIXOS_DE_RUA = [
+  'carrer', 'calle', 'avinguda', 'avenida', 'plaza', 'plaça', 'placa',
+  'rua', 'travessa', 'largo', 'praça', 'praca', 'estrada', 'caminho',
+  'via', 'viale', 'piazza', 'corso', 'strada',
+  'rue', 'boulevard', 'passeig', 'paseo', 'ronda', 'camino'
+];
+
+
+function semNomesDeRua(texto) {
+  const t = String(texto || '').toLowerCase();
+
+  /**
+   * Cada troço entre vírgulas é avaliado sozinho.
+   *
+   * "Carrer de Tarragona" sai; "Eivissa" fica. Cortar só a
+   * primeira parte não chegava: as moradas do Google têm três a
+   * cinco troços, e a rua nem sempre é o primeiro.
+   */
+  return t
+    .split(',')
+    .filter((parte) => {
+      const p = parte.trim();
+      return !PREFIXOS_DE_RUA.some((pre) => p.startsWith(pre + ' '));
+    })
+    .join(', ');
+}
+
+
 function detectZone(zones, fallback, pickupText, dropoffText) {
   for (const text of [pickupText, dropoffText]) {
-    const t = String(text || '').toLowerCase();
+    const t = semNomesDeRua(text);
+
     for (const z of Object.values(zones)) {
       if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) return z;
     }
   }
   return fallback;
 }
+
+/**
+ * O país, dito pelo Google quando o temos.
+ *
+ * O browser guarda o country do address_components — ES, PT, IT,
+ * em duas letras. Isso não se confunde com nada.
+ *
+ * Quando não vem — reservas antigas, o call centre a criar à mão
+ * — cai-se no texto, como antes.
+ */
+function paisDito(o) {
+  const de = String(o.pickupCountry || '').toUpperCase();
+  const para = String(o.dropoffCountry || '').toUpperCase();
+
+  /**
+   * Os dois lados têm de concordar.
+   *
+   * Uma rota de Espanha para França não é uma rota espanhola: as
+   * tarifas por zona são para viagens dentro do mesmo país.
+   */
+  if (de && para && de === para) {
+    if (de === 'ES' || de === 'PT' || de === 'IT') return de;
+    return 'OTHER';
+  }
+
+  return null;
+}
+
 
 function detectCountry(pickupText, dropoffText) {
   const t = (String(pickupText || '') + ' ' + String(dropoffText || '')).toLowerCase();
@@ -259,14 +330,55 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
    */
   const noite = isNightPickup(o.pickupTime) ? NIGHT_MULT : 1;
 
-  const country = detectCountry(o.pickupText, o.dropoffText) ||
+  const country = paisDito(o) ||
+    detectCountry(o.pickupText, o.dropoffText) ||
     (isPortugalRoute ? 'PT' : null);
 
+  /**
+   * O OTHER é uma resposta, não uma falta de resposta.
+   *
+   * Significa "o Google disse-me o país e não é dos três com
+   * tarifa própria". Sem isto, caía no detectCountry e uma morada
+   * em Dublin com "Roma Street" levava a tarifa italiana.
+   */
+  if (country === 'OTHER') {
+    return Math.max(25, (20 + distanceKm * 3.5) * 1.3 * vehicle.mult * noite);
+  }
+
   if (country === 'ES') {
+    /**
+     * A zona, ignorando nomes de rua.
+     *
+     * Este ramo procurava as palavras no texto cru — e uma morada
+     * em Ibiza com "Carrer de Tarragona" caía na tarifa de
+     * Barcelona: 56 euros em vez de 73.
+     *
+     * O detectZone já filtrava, mas este ramo não o usa. Duas
+     * formas de fazer a mesma coisa, e só uma estava corrigida.
+     */
+    /**
+     * A cidade dita pelo Google, quando a temos.
+     *
+     * "Eivissa" e "Barcelona" são cidades; "Carrer de Tarragona" é
+     * uma rua. O Google sabe a diferença e diz-no-la — procurar
+     * palavras no texto nunca vai saber.
+     *
+     * O semNomesDeRua fica como rede: reservas antigas e o call
+     * centre não trazem estes campos.
+     */
+    const textoZona = (o.pickupCity || o.dropoffCity)
+      ? [o.pickupCity, o.dropoffCity, o.pickupRegion, o.dropoffRegion]
+          .filter(Boolean).join(', ').toLowerCase()
+      : semNomesDeRua(
+          String(o.pickupText || '') + ', ' + String(o.dropoffText || '')
+        );
+
     let zoneName = null;
     for (const [name, z] of Object.entries(ES_ZONES)) {
-      const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
-      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
+      if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(textoZona))) {
+        zoneName = name;
+        break;
+      }
     }
 
     const zone = zoneName ? ES_ZONES[zoneName] : ES_FALLBACK;
@@ -285,8 +397,22 @@ function computePriceEUR(distanceKm, passengers, isPortugalRoute, opts) {
   }
 
   if (country === 'IT') {
+    /**
+     * Em Itália isto é ainda mais importante.
+     *
+     * "Via Roma" existe em praticamente todas as cidades
+     * italianas. Sem filtrar, uma morada em Palermo com Via Roma
+     * levava a tarifa de Roma.
+     */
     let zoneName = null;
-    const t = (String(o.pickupText || '') + ' ' + String(o.dropoffText || '')).toLowerCase();
+
+    // A cidade dita pelo Google, com o texto como rede.
+    const t = (o.pickupCity || o.dropoffCity)
+      ? [o.pickupCity, o.dropoffCity, o.pickupRegion, o.dropoffRegion]
+          .filter(Boolean).join(', ').toLowerCase()
+      : semNomesDeRua(
+          String(o.pickupText || '') + ', ' + String(o.dropoffText || '')
+        );
 
     for (const [name, z] of Object.entries(IT_ZONES)) {
       if (z.words.some((w) => new RegExp('\\b' + w + '\\b').test(t))) { zoneName = name; break; }
