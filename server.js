@@ -2710,6 +2710,25 @@ async function criarSessaoCheckout(req, res) {
     });
   }
 
+  /**
+   * E o indicativo.
+   *
+   * Um número sem indicativo é um número que não marca. O
+   * checkout tem um seletor obrigatório, mas isso vive no
+   * browser — e o browser pode ser contornado.
+   *
+   * Antes era assumido 351 quando faltava, e um motorista em
+   * Espanha marcava um número português que não existe.
+   */
+  const indicativo = String(booking.phone_code || '').replace(/\D/g, '');
+
+  if (!indicativo || indicativo.length > 4) {
+    return res.status(400).json({
+      error: 'Pick the country code for your phone number.',
+      field_error: true
+    });
+  }
+
   // O nome também: o motorista tem de saber por quem espera.
   if (String(booking.full_name || booking.passenger_name || '').trim().length < 2) {
     return res.status(400).json({ error: 'A name is needed for the booking.' });
