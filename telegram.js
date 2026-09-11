@@ -735,6 +735,135 @@ export async function telegramNewAgency(agencia) {
 }
 
 
+/**
+ * ---------------------------------------------------------------
+ * OS ALARMES QUE NASCERAM DO DIA 10 DE SETEMBRO
+ *
+ * Nesse dia, um preço errado esteve horas no ar sem ninguém saber.
+ * Outro cobrava 26 euros por uma viagem de 87. Um terceiro recusava
+ * a calculadora inteira.
+ *
+ * Nenhum deu erro. Todos saíram números bonitos.
+ *
+ * Estes alarmes vigiam o que os testes não apanham: valores que são
+ * válidos mas não fazem sentido.
+ * ---------------------------------------------------------------
+ */
+
+/**
+ * Um preço fora do que é plausível.
+ *
+ * Não há regra que diga qual é o preço certo — mas há limites que
+ * dizem que algo está errado. Vinte e seis euros num transfer de
+ * noventa quilómetros não é um desconto: é uma distância que
+ * chegou a zero.
+ */
+export async function telegramPrecoEstranho(dados) {
+  const { km, preco, de, para, motivo } = dados;
+
+  return send(ALERTS, [
+    '💰 *Price looks wrong*',
+    '',
+    `*${esc(motivo)}*`,
+    '',
+    `${esc(String(km))} km → *${esc(preco.toFixed(2))} EUR*`,
+    `${esc(Number(preco / Math.max(km, 1)).toFixed(2))} EUR per km`,
+    '',
+    esc(String(de).slice(0, 60)),
+    esc(String(para).slice(0, 60))
+  ].join('\n'), { silent: false });
+}
+
+
+/**
+ * O cliente viu um preço e o servidor calculou outro.
+ *
+ * É o alarme mais importante dos três. Quando dispara, alguém está
+ * a ser cobrado a mais ou a menos — e não é preciso esperar por uma
+ * reclamação para saber.
+ */
+export async function telegramPrecoDivergente(dados) {
+  const { visto, calculado, km, de, para } = dados;
+
+  const diff = Math.abs(visto - calculado);
+  const pct = Math.round((diff / calculado) * 100);
+
+  return send(ALERTS, [
+    '⚠️ *Price mismatch*',
+    '',
+    `Client saw *${esc(visto.toFixed(2))}*, server says *${esc(calculado.toFixed(2))}*`,
+    `Difference: ${esc(diff.toFixed(2))} EUR \\(${esc(String(pct))}%\\)`,
+    '',
+    `${esc(String(km))} km`,
+    esc(String(de).slice(0, 60)),
+    esc(String(para).slice(0, 60))
+  ].join('\n'), { silent: false });
+}
+
+
+/**
+ * Um dia sem reservas nenhumas.
+ *
+ * O alarme mais simples e o mais útil. Se o site estiver partido de
+ * uma maneira que não dá erro — a calculadora fechada, o botão
+ * morto, o checkout a recusar — isto nota-se pela ausência.
+ *
+ * Um dia mau tem poucas reservas. Um dia partido tem zero.
+ */
+export async function telegramSemReservas(horas) {
+  return send(ALERTS, [
+    '🔇 *No bookings*',
+    '',
+    `Nothing has come through in ${esc(String(horas))} hours\\.`,
+    '',
+    'This may be a quiet day, or the site may be broken in a way ' +
+    'that does not raise an error\\. Worth opening the calculator ' +
+    'and trying a route\\.'
+  ].join('\n'), { silent: false });
+}
+
+
+/**
+ * Uma reserva criada sem os dados que tem de ter.
+ *
+ * Uma reserva sem telefone é uma pessoa que não se consegue
+ * contactar no dia. Sem preço é uma que não se cobra. Sem distância
+ * é uma que foi cobrada pelo mínimo.
+ *
+ * Melhor saber quando entra do que na véspera da viagem.
+ */
+export async function telegramReservaIncompleta(reserva, faltam) {
+  return send(ALERTS, [
+    '🕳️ *Booking with missing data*',
+    '',
+    `*${esc(reserva.booking_id || reserva.id || 'no reference')}*`,
+    esc(reserva.full_name || reserva.email || ''),
+    '',
+    `Missing: ${esc(faltam.join(', '))}`,
+    '',
+    esc(String(reserva.pickup || '').slice(0, 60)),
+    esc(String(reserva.dropoff || '').slice(0, 60))
+  ].join('\n'), { silent: false });
+}
+
+
+/**
+ * Um deploy aconteceu.
+ *
+ * Não é um erro — mas quando algo parte, a primeira pergunta é
+ * sempre "o que mudou?". Um aviso a dizer que o serviço arrancou
+ * dá a resposta sem ter de a procurar.
+ */
+export async function telegramArranque(servico) {
+  return send(ALERTS, [
+    '🚀 *Deployed*',
+    '',
+    `${esc(servico)} is back up\\.`,
+    `_${esc(new Date().toISOString().slice(0, 16).replace('T', ' '))}_`
+  ].join('\n'), { silent: true });
+}
+
+
 /** O trabalho de fundo parou. */
 export async function telegramTickDown(minutes) {
   return send(ALERTS, [
@@ -754,13 +883,107 @@ export async function telegramTickDown(minutes) {
  * Chamado pela rota de diagnóstico. Manda para os dois canais, e
  * diz qual funcionou.
  */
+/**
+ * Um exemplo de cada aviso, nos dois canais.
+ *
+ * Testar só a ligação diz que o token funciona. Não diz se a
+ * mensagem de reserva cabe no ecrã, se o escape do MarkdownV2
+ * aguenta um nome com parêntesis, ou se o canal certo recebe a
+ * coisa certa.
+ *
+ * Isto manda um de cada. Uma vez, depois de publicar, e sabe-se.
+ */
 export async function telegramTest() {
-  const vendas = await send(SALES, '*Test* · sales channel is working', { silent: true });
-  const alarmes = await send(ALERTS, '*Test* · alerts channel is working');
+  if (!TOKEN) {
+    return { configured: false, error: 'TELEGRAM_BOT_TOKEN is not set.' };
+  }
+
+  const feito = {};
+
+  /**
+   * Marcados como teste, no topo.
+   *
+   * Sem isto, quem vir o canal ao telemóvel acha que houve uma
+   * reserva a sério — e vai procurá-la no painel.
+   */
+  const marca = '🧪 *TEST — ignore*\n\n';
+
+  // ---------- vendas ----------
+  feito.sales_channel = await send(SALES,
+    marca + 'Sales channel is working', { silent: false });
+
+  feito.new_booking = await send(SALES, marca + [
+    '*New booking*',
+    '',
+    '*Test Passenger*',
+    'test\\@example\\.com',
+    '\\+351 900 000 000',
+    '',
+    '📍 Faro Airport',
+    '🏁 Albufeira',
+    '',
+    '📅 2026\\-10\\-15 at 23:30  🌙 night',
+    '👥 2 passengers · Sedan',
+    '',
+    '💶 *55\\.00 EUR* · paid now'
+  ].join('\n'), { silent: false });
+
+  feito.new_account = await send(SALES, marca + [
+    '✨ *New customer account*',
+    '',
+    'Test Person',
+    'test\\@example\\.com'
+  ].join('\n'), { silent: false });
+
+  feito.new_agency = await send(SALES, marca + [
+    '🏢 *New travel agent application*',
+    '',
+    '*Test Travel Ltd*',
+    'test\\@example\\.com',
+    'Ireland'
+  ].join('\n'), { silent: false });
+
+  feito.new_partner = await send(SALES, marca + [
+    '*New partner application*',
+    '',
+    'Test Transfers',
+    'Spain',
+    'test\\@example\\.com'
+  ].join('\n'), { silent: false });
+
+  // ---------- alarmes ----------
+  feito.alerts_channel = await send(ALERTS,
+    marca + 'Alerts channel is working', { silent: false });
+
+  feito.new_chat = await send(ALERTS, marca + [
+    '💬 *New support ticket*',
+    '',
+    '👤 Customer · Test Person',
+    '',
+    '_SU\\-00000_'
+  ].join('\n'), { silent: false });
+
+  feito.task_failed = await send(ALERTS, marca + [
+    '⚠️ *calendar\\-sweep* failed',
+    '',
+    'This is a test\\. Nothing is broken\\.'
+  ].join('\n'), { silent: false });
+
+  /**
+   * O que falhou, se falhou.
+   *
+   * Um envio que devolve ok:false diz porquê — quase sempre o
+   * chat_id errado ou o bot que não está no grupo.
+   */
+  const falhas = Object.entries(feito)
+    .filter(([, r]) => r && r.ok === false)
+    .map(([nome, r]) => ({ [nome]: r.error || r.description || 'failed' }));
 
   return {
-    configured: Boolean(TOKEN),
-    sales: vendas,
-    alerts: alarmes
+    configured: true,
+    sales_chat: SALES ? 'set' : 'MISSING',
+    alerts_chat: ALERTS ? 'set' : 'MISSING',
+    sent: Object.keys(feito).length,
+    failures: falhas.length ? falhas : null
   };
 }
