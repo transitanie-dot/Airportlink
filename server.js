@@ -2908,6 +2908,48 @@ for (const chave of Object.keys(metadata)) {
         mode: 'setup',
         payment_method_types: ['card'],
         customer_email: booking.email,
+
+        /**
+         * O valor, escrito no topo do formulário.
+         *
+         * No modo setup o Stripe não mostra preço nenhum — só pede
+         * o cartão. Do lado do cliente, isso é dar os dados do
+         * cartão sem ver quanto vai ser cobrado, o que é o momento
+         * em que mais gente desiste.
+         *
+         * O custom_text põe uma linha por cima do formulário. Não
+         * é o mesmo que o total grande do modo payment, mas diz o
+         * essencial: quanto, e quando.
+         */
+        custom_text: {
+          submit: {
+            /**
+             * As moradas cortadas a 60.
+             *
+             * O Stripe recusa a sessão inteira acima de 1200
+             * caracteres. Duas moradas completas com código postal
+             * e país chegam perto disso, e a recusa não diz porquê.
+             */
+            /**
+             * O total que o Stripe vai cobrar, não uma perna.
+             *
+             * O totalInCurrency é o mesmo número que o modo
+             * "pagar agora" usa: já leva a volta, o desconto de
+             * ida e volta e a comissão da agência.
+             *
+             * Calculá-lo aqui outra vez seria uma sexta cópia de
+             * uma regra que hoje já divergiu quatro vezes.
+             */
+            message:
+              `${currency} ${totalInCurrency.toFixed(2)}` +
+              `${ret ? ' (return included)' : ''} · ` +
+              `${String(booking.pickup).slice(0, 60)} → ` +
+              `${String(booking.dropoff).slice(0, 60)}. ` +
+              `Nothing is charged today. We take it 48 hours before ` +
+              `pick-up, and you can cancel free up to 24 hours before.`
+          }
+        },
+
         success_url: `${SITE_ORIGIN}/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${SITE_ORIGIN}/?cancel=true`,
         metadata,
@@ -4609,11 +4651,33 @@ app.post('/api/stripe-webhook', async (req, res) => {
     }
   };
 
-  const marcarFeito = (erro) =>
-    supabase.rpc('payment_event_done', {
-      p_event_id: event.id,
-      p_error: erro || null
-    }).catch(() => {});
+  /**
+   * Marcar o evento como tratado.
+   *
+   * Num try, não num .catch: o construtor do Supabase é um
+   * "thenable" — tem .then, e o await funciona, mas nem todas as
+   * versões expõem .catch.
+   *
+   * Aqui isso é pior do que noutro sítio: se esta chamada
+   * rebentar, o evento do Stripe fica por tratar e volta a ser
+   * entregue. Uma reserva criada duas vezes, ou um reembolso
+   * repetido.
+   */
+  const marcarFeito = async (erro) => {
+    try {
+      await supabase.rpc('payment_event_done', {
+        p_event_id: event.id,
+        p_error: erro || null
+      });
+    } catch (e) {
+      console.error('payment_event_done:', e.message);
+
+      telegramTaskFailed('stripe webhook',
+        `Could not mark event ${event.id} as done: ${e.message}. ` +
+        'Stripe will retry it.'
+      ).catch(() => {});
+    }
+  };
 
   /** A reserva a que este pagamento pertence. */
   const reservaDoIntent = async (intentId) => {
