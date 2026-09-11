@@ -2032,7 +2032,27 @@ async function sendVerification(email, name, kind) {
      *
      * Ver o endereço gerado distingue-as em segundos.
      */
-    console.log('[verify] link para', email, ':', link.slice(0, 120));
+    /**
+     * O link, partido nas partes que interessam.
+     *
+     * Cortá-lo a 120 caracteres escondia justamente o
+     * redirect_to, que é a causa mais provável de um link que não
+     * funciona.
+     *
+     * O token vai cortado de propósito: é um segredo de uso único
+     * e não faz falta para diagnosticar.
+     */
+    try {
+      const u = new URL(link);
+
+      console.log('[verify]', email,
+        '| projeto:', u.hostname,
+        '| tipo:', u.searchParams.get('type') || '(sem type)',
+        '| redirect_to:', u.searchParams.get('redirect_to') || '(nenhum)',
+        '| token:', (u.searchParams.get('token') || '').slice(0, 8) + '…');
+    } catch {
+      console.log('[verify]', email, '| link mal formado:', link.slice(0, 80));
+    }
 
     if (kind === 'partner') {
       return await sendVerifyPartner({ email, name, link });
