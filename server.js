@@ -823,6 +823,18 @@ const ALLOWED_ORIGINS = [
    */
   'https://www.airportlink.app',
 
+  /**
+   * O portal dos motoristas e o call centre.
+   *
+   * Vivem noutros domínios e chamam esta API — o portal para
+   * definir a palavra-passe, o call centre para tudo o resto.
+   *
+   * Sem esta linha, o browser recusa o pedido e diz "Failed to
+   * fetch", que não explica nada.
+   */
+  'https://drivers.airportlink.app',
+  'https://callcentre.airportlink.app',
+
   'https://www.theepictours.com',
   /\.filesusr\.com$/,
   /\.wixsite\.com$/,
