@@ -1347,6 +1347,71 @@ export async function sendVerifyCustomer({ email, name, link }) {
 }
 
 
+/**
+ * Um link para entrar, a quem ficou de fora.
+ *
+ * Para os parceiros que se registaram durante o período em que o
+ * email de confirmação não saía. A conta existe, o email já foi
+ * confirmado à mão — o que falta é uma forma de entrar.
+ *
+ * O email não menciona o problema. Quem se registou há três
+ * semanas já não se lembra do que esperava — e uma explicação
+ * sobre uma falha nossa dá-lhe uma razão para duvidar antes de
+ * ter começado.
+ *
+ * Diz o que interessa: a conta existe, define a palavra-passe,
+ * e estes são os documentos.
+ */
+export async function sendPartnerAccessLink({ email, name, company, link }) {
+  try {
+    if (!email || !link) return { sent: false, reason: 'no-email-or-link' };
+
+    const primeiro = String(name || '').trim().split(/\s+/)[0];
+
+    const html = wrap({
+      preheader: 'Set your password and finish signing up.',
+      heading: 'Your account is ready',
+
+      intro: `${primeiro && primeiro.length > 1 ? 'Hi ' + primeiro + ',' : 'Hello,'}\n\n` +
+             `Your Airportlink partner account for ` +
+             `${company ? esc(company) : 'your company'} is ready. ` +
+             'Set a password and you can finish setting it up.',
+
+      blocks: [
+        {
+          type: 'note',
+          text: 'Set a password with the button below and you are in. ' +
+                'Then there are three documents to upload: your operating ' +
+                'licence, your insurance, and a driver licence. We check ' +
+                'them within one working day.'
+        }
+      ],
+
+      cta: {
+        label: 'Set my password',
+        url: link
+      },
+
+      signOff: 'The Airportlink — Ops team',
+
+      footNote: 'This link works once and expires in 24 hours. ' +
+                'If it does not work, write to us and we will send another.'
+    });
+
+    return await sendOnce({
+      key: `access:${email}:${Date.now()}`,
+      template: 'partner_access',
+      to: email,
+      subject: 'Your Airportlink partner account is ready',
+      html
+    });
+  } catch (error) {
+    console.error('sendPartnerAccessLink failed:', error);
+    return { sent: false, reason: error.message };
+  }
+}
+
+
 export async function sendPasswordChanged(email) {
   try {
     if (!email) return { sent: false, reason: 'no-email' };
