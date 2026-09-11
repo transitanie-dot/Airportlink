@@ -6952,12 +6952,24 @@ app.get('/api/tasks/test-verify', async (req, res) => {
 
     const r = await sendVerification(email, req.query.name || null, kind);
 
+    /**
+     * O "duplicate" explicado.
+     *
+     * O anti-duplicados devolve isso quando já foi enviado um
+     * email igual hoje. A palavra sozinha não diz o que fazer.
+     */
+    const nota = r.reason === 'duplicate'
+      ? 'Já foi enviado um hoje. O anti-duplicados deixa passar um ' +
+        'por dia e por endereço — amanhã passa, ou apaga a linha do ' +
+        'email_log para forçar.'
+      : 'O link vai no registo do Render, procura por [verify]';
+
     return res.json({
       ...r,
       email,
       kind,
       confirmado: Boolean(existe.email_confirmed_at),
-      nota: 'O link vai no registo do Render, procura por [verify]'
+      nota
     });
   } catch (e) {
     console.error('test-verify:', e.message);
