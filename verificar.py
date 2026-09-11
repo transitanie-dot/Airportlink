@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""
+verificar.py — o que devia ter sido feito antes de enviar.
+
+Três erros repetiram-se numa sessão inteira, e todos tinham a mesma
+causa: escrever um nome novo sem procurar se já existia.
+
+  followup       quando já havia follow-up
+  pintarVistas   quando já havia uma função com esse nome
+  close_chat     quando já havia uma rota e um botão assim
+
+Mais uma família inteira de colunas inventadas: vehicle_class,
+return_of, stage, responded_at, sender_id, calendar_event_id.
+
+Este ficheiro corre antes de eu enviar seja o que for. O que não
+passar, não sai daqui.
+
+    python3 verificar.py
+
+Sem argumentos verifica tudo. Com um caminho, só esse ficheiro.
+"""
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent
+
+# Os ficheiros que importam, por tipo.
+MODULOS = ['server.js', 'server-drivers.js', 'partners.js', 'support.js',
+           'support-shared.js', 'emailService.js', 'emailclient.js',
+           'calendar.js', 'telegram.js', 'flights.js']
+
+PAGINAS = ['callcentre/public/index.html', 'drivers-public/index.html',
+           'render-site/support.html', 'render-site/myaccount.html',
+           'render-site/maps/index.html', 'render-site/index.html',
+           'render-site/checkout/index.html', 'render-site/agency.html']
+
+SCRIPTS = ['callcentre/public/assets/desk.js']
+
+problemas = []
+avisos = []
+
+
+def erro(ficheiro, msg):
+    problemas.append(f'{ficheiro}: {msg}')
+
+
+def aviso(ficheiro, msg):
+    avisos.append(f'{ficheiro}: {msg}')
+
+
+def ler(caminho):
+    p = RAIZ / caminho
+    return p.read_text(encoding='utf-8') if p.exists() else None
+
+
+# ============================================================
+# 1. SINTAXE
+#
+# O node --check trata os .js como CommonJS e não vê erros de
+# sintaxe em módulos ES. Um import mal formado passava — e passou,
+# até rebentar no arranque do Render.
+# ============================================================
+
+def sintaxe():
+    for f in MODULOS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        r = subprocess.run(
+            ['node', '--input-type=module', '--check'],
+            input=s, capture_output=True, text=True
+        )
+
+        if r.returncode != 0:
+            primeira = r.stderr.strip().split('\n')
+            linha = next((l for l in primeira if 'Error' in l), primeira[0])
+            erro(f, f'sintaxe — {linha.strip()[:90]}')
+
+    for f in SCRIPTS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        r = subprocess.run(['node', '--check'], input=s,
+                           capture_output=True, text=True)
+
+        if r.returncode != 0:
+            erro(f, 'sintaxe — ' + r.stderr.strip().split('\n')[0][:90])
+
+    # O JavaScript dentro das páginas.
+    for f in PAGINAS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        for bloco in re.findall(r'<script>\n([\s\S]*?)</script>', s):
+            if len(bloco.strip()) < 200:
+                continue
+
+            r = subprocess.run(
+                ['node', '-e', 'new Function(require("fs").readFileSync(0,"utf8"))'],
+                input=bloco, capture_output=True, text=True
+            )
+
+            if r.returncode != 0:
+                erro(f, 'sintaxe no <script> — ' +
+                     r.stderr.strip().split('\n')[-1][:80])
+                break
+
+
+# ============================================================
+# 2. NOMES DUPLICADOS
+#
+# O erro que se repetiu três vezes. Duas funções com o mesmo nome:
+# o JavaScript usa a última, e a primeira desaparece em silêncio.
+# ============================================================
+
+def duplicados():
+    for f in MODULOS + SCRIPTS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        # Só as do topo do ficheiro.
+        #
+        # Uma função dentro de outra pode repetir o nome: são
+        # escopos diferentes, e é normal ter um "has" auxiliar em
+        # duas funções distintas.
+        #
+        # O que colide são as do topo, onde o JavaScript usa a
+        # última e a primeira desaparece.
+        nomes = re.findall(r'^(?:export\s+)?(?:async\s+)?function (\w+)\s*\(',
+                           s, re.M)
+
+        vistos = {}
+        for n in nomes:
+            vistos[n] = vistos.get(n, 0) + 1
+
+        for n, c in vistos.items():
+            if c > 1:
+                erro(f, f'função "{n}" definida {c} vezes')
+
+    # As rotas, que colidem da mesma maneira.
+    for f in ['server.js', 'support.js', 'partners.js', 'server-drivers.js']:
+        s = ler(f)
+        if s is None:
+            continue
+
+        rotas = re.findall(
+            r"(?:app|router)\.(get|post|put|delete)\('([^']+)'", s)
+
+        vistas = {}
+        for metodo, caminho in rotas:
+            chave = f'{metodo.upper()} {caminho}'
+            vistas[chave] = vistas.get(chave, 0) + 1
+
+        for chave, c in vistas.items():
+            if c > 1:
+                erro(f, f'rota "{chave}" declarada {c} vezes '
+                        '(o Express usa a primeira)')
+
+    # E os ids no HTML.
+    for f in PAGINAS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        # Só os do HTML, não os que o JS escreve dentro de
+        # strings: um elemento substituido por outro com o mesmo id
+        # é normal.
+        so_html = re.sub(r'<script>[\s\S]*?</script>', '', s)
+
+        ids = re.findall(r'id="([\w-]+)"', so_html)
+        vistos = {}
+        for i in ids:
+            vistos[i] = vistos.get(i, 0) + 1
+
+        for i, c in vistos.items():
+            if c > 1:
+                erro(f, f'id="{i}" repetido {c} vezes')
+
+
+# ============================================================
+# 3. RECURSÃO ACIDENTAL
+#
+# Uma substituição em massa fez o refDe() chamar-se a si próprio.
+# Passou a leitura e rebentou em produção com "Maximum call stack
+# size exceeded".
+# ============================================================
+
+def recursao():
+    for f in MODULOS + SCRIPTS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        for m in re.finditer(
+                r'(?:export\s+)?(?:async\s+)?function (\w+)\s*\([^)]*\)\s*\{', s):
+            nome = m.group(1)
+            i = m.end()
+
+            prof, j = 1, i
+            while j < len(s) and prof > 0:
+                if s[j] == '{':
+                    prof += 1
+                elif s[j] == '}':
+                    prof -= 1
+                j += 1
+
+            corpo = s[i:j]
+
+            # Curta e a chamar-se a si própria no return: quase de
+            # certeza um acidente.
+            if len(corpo) < 500 and re.search(
+                    r'return\s+' + nome + r'\s*\(', corpo):
+                erro(f, f'função "{nome}" chama-se a si própria no return')
+
+
+# ============================================================
+# 4. IDS QUE O JS PROCURA E O HTML NÃO TEM
+# ============================================================
+
+PARES = [
+    ('callcentre/public/assets/desk.js', 'callcentre/public/index.html'),
+]
+
+def ids_em_falta():
+    for js, html in PARES:
+        s, h = ler(js), ler(html)
+        if s is None or h is None:
+            continue
+
+        procurados = set(re.findall(r"el\('([\w-]+)'\)", s))
+        existentes = set(re.findall(r'id="([\w-]+)"', h))
+
+        # Os criados pelo próprio JS não contam.
+        criados = set(re.findall(r"id=\"([\w-]+)\"'", s))
+        criados |= set(re.findall(r"id=\\?'([\w-]+)\\?'", s))
+
+        falta = sorted(procurados - existentes - criados)
+
+        if falta:
+            aviso(js, f'ids que o HTML não tem: {", ".join(falta[:8])}')
+
+    # E dentro das páginas, onde o JS e o HTML vivem juntos.
+    for f in PAGINAS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        procurados = set(re.findall(r"\$\('([\w-]+)'\)", s))
+        existentes = set(re.findall(r'id="([\w-]+)"', s))
+
+        # Um id repetido pode ser o JS a substituir o elemento por
+        # outro com o mesmo id. Não conta como duplicacao.
+        falta = sorted(procurados - existentes)
+
+        if falta:
+            aviso(f, f'ids que o HTML não tem: {", ".join(falta[:8])}')
+
+
+# ============================================================
+# 5. COLUNAS INVENTADAS
+#
+# A família de erros mais cara: vehicle_class, return_of, stage,
+# responded_at, sender_id, calendar_event_id.
+#
+# Compara o que o SQL usa com o que o código escreve. Não é
+# infalível — nada aqui vê a base de dados a sério — mas apanha o
+# caso comum de eu escrever um nome que nunca existiu em lado
+# nenhum.
+# ============================================================
+
+def colunas():
+    codigo = ''
+    for f in MODULOS + SCRIPTS:
+        s = ler(f)
+        if s:
+            codigo += s
+
+    sqls = sorted((RAIZ / 'sql').glob('*.sql')) if (RAIZ / 'sql').exists() else []
+
+    # As colunas que o código escreve ou lê, em qualquer sítio.
+    conhecidas = set(re.findall(r'\b(\w+):\s', codigo))
+    conhecidas |= set(re.findall(r"select\('([^']+)'", codigo))
+    conhecidas |= set(re.findall(r"eq\('(\w+)'", codigo))
+    conhecidas |= set(re.findall(r'\.(\w+)\b', codigo))
+
+    # E as que os próprios SQL criam.
+    for q in sqls:
+        s = q.read_text(encoding='utf-8')
+        conhecidas |= set(re.findall(r'add column if not exists (\w+)', s))
+        conhecidas |= set(re.findall(r'^\s+(\w+) (?:text|uuid|int|bool|numeric|timestamptz|jsonb|smallint)',
+                                     s, re.M))
+
+    # Palavras que não são colunas.
+    RESERVADAS = {
+        'select', 'from', 'where', 'and', 'or', 'not', 'null', 'true',
+        'false', 'case', 'when', 'then', 'else', 'end', 'as', 'on',
+        'join', 'left', 'inner', 'cross', 'union', 'all', 'order', 'by',
+        'group', 'having', 'limit', 'offset', 'with', 'insert', 'into',
+        'values', 'update', 'set', 'delete', 'returns', 'table', 'function',
+        'language', 'security', 'definer', 'stable', 'immutable', 'begin',
+        'declare', 'return', 'exists', 'count', 'sum', 'avg', 'min', 'max',
+        'coalesce', 'now', 'interval', 'text', 'uuid', 'int', 'jsonb',
+        'default', 'create', 'replace', 'drop', 'alter', 'add', 'column',
+        'constraint', 'check', 'index', 'grant', 'execute', 'to', 'if',
+        'distinct', 'filter', 'over', 'partition', 'lateral', 'using'
+    }
+
+    for q in sqls:
+        # Os de diagnóstico não interessam: são para explorar.
+        if 'diag' in q.name or 'comparar' in q.name or 'verificar' in q.name:
+            continue
+
+        s = q.read_text(encoding='utf-8')
+
+        # As colunas referidas com prefixo de tabela: c.foo, b.bar
+        usadas = set(re.findall(r'\b[a-z]\.(\w+)\b', s))
+        usadas -= RESERVADAS
+
+        # Os aliases que o proprio SQL define nao sao colunas:
+        # "count(*) as aprovadas" cria um nome que so existe ali.
+        usadas -= set(re.findall(r'\bas (\w+)\b', s))
+        usadas -= set(re.findall(r"'(\w+)',", s))
+
+        # E as tabelas de sistema do Postgres.
+        if 'pg_' in s or 'information_schema' in s:
+            usadas -= {
+                'column_name', 'data_type', 'table_name', 'relname',
+                'relkind', 'objid', 'refobjid', 'ev_class', 'indexrelid',
+                'indisunique', 'indkey', 'indrelid', 'proname', 'oid',
+                'relrowsecurity', 'relforcerowsecurity', 'policyname',
+                'tablename', 'schemaname', 'ordinal_position'
+            }
+
+        desconhecidas = sorted(
+            c for c in usadas
+            if c not in conhecidas
+            and len(c) > 3
+            and not c.isupper()
+        )
+
+        if desconhecidas:
+            aviso(f'sql/{q.name}',
+                  'colunas que o código nunca usa — verificar: ' +
+                  ', '.join(desconhecidas[:6]))
+
+
+# ============================================================
+# 6. EQUILÍBRIOS
+# ============================================================
+
+def equilibrios():
+    for f in PAGINAS:
+        s = ler(f)
+        if s is None:
+            continue
+
+        abre = len(re.findall(r'<div\b', s))
+        fecha = len(re.findall(r'</div>', s))
+
+        if abre != fecha:
+            erro(f, f'{abre} <div> para {fecha} </div>')
+
+        estilo = re.search(r'<style>([\s\S]*)</style>', s)
+        if estilo:
+            c = estilo.group(1)
+            if c.count('{') != c.count('}'):
+                erro(f, f'CSS: {c.count("{")} chavetas abertas, '
+                        f'{c.count("}")} fechadas')
+
+    css = ler('callcentre/public/assets/desk.css')
+    if css and css.count('{') != css.count('}'):
+        erro('callcentre/public/assets/desk.css',
+             f'{css.count("{")} chavetas abertas, {css.count("}")} fechadas')
+
+    if (RAIZ / 'sql').exists():
+        for q in sorted((RAIZ / 'sql').glob('*.sql')):
+            s = q.read_text(encoding='utf-8')
+
+            # Sem comentários nem strings: um parêntese dentro de
+            # "close_chat(uuid, text, text)" num comentário não
+            # desequilibra nada.
+            limpo = re.sub(r'--[^\n]*', '', s)
+            limpo = re.sub(r"'[^']*'", "''", limpo)
+
+            if limpo.count('(') != limpo.count(')'):
+                erro(f'sql/{q.name}',
+                     f'{limpo.count("(")} parênteses abertos, '
+                     f'{limpo.count(")")} fechados')
+
+            # As aspas simples, fora dos blocos $$ onde vivem strings
+            # com apóstrofos.
+            fora = re.sub(r'\$\$[\s\S]*?\$\$', '', s)
+            if fora.count("'") % 2 != 0:
+                aviso(f'sql/{q.name}', 'número ímpar de aspas simples')
+
+
+# ============================================================
+# 7. FUNÇÕES SQL COM RETORNO ALTERADO
+#
+# "cannot change return type of existing function". Aconteceu duas
+# vezes: no agent_day_metrics e no support_capacity.
+# ============================================================
+
+def retornos():
+    if not (RAIZ / 'sql').exists():
+        return
+
+    for q in sorted((RAIZ / 'sql').glob('*.sql')):
+        s = q.read_text(encoding='utf-8')
+
+        # As que devolvem uma tabela e são criadas com "or replace"
+        for m in re.finditer(
+                r'create or replace function (\w+)\s*\([^)]*\)\s*\nreturns table',
+                s):
+            nome = m.group(1)
+
+            if f'drop function if exists {nome}' not in s:
+                aviso(f'sql/{q.name}',
+                      f'{nome}() devolve uma tabela e não tem drop antes — '
+                      'se as colunas mudarem, o Postgres recusa')
+
+
+# ============================================================
+# 8. RENAME SEM PROTEÇÃO
+#
+# O "rename column" não tem "if exists". Correr o ficheiro duas
+# vezes dá erro na segunda, e um ficheiro que não se pode repetir é
+# um ficheiro que se tem medo de correr.
+# ============================================================
+
+def renames():
+    if not (RAIZ / 'sql').exists():
+        return
+
+    for q in sorted((RAIZ / 'sql').glob('*.sql')):
+        s = q.read_text(encoding='utf-8')
+
+        for m in re.finditer(r'^\s*alter table \w+\s*\n?\s*rename column',
+                             s, re.M):
+            i = m.start()
+            antes = s[max(0, i - 600):i]
+
+            if 'information_schema.columns' not in antes:
+                aviso(f'sql/{q.name}',
+                      'rename column sem verificar se a coluna existe — '
+                      'o ficheiro não se pode correr duas vezes')
+                break
+
+
+# ============================================================
+# CORRER
+# ============================================================
+
+def formulas_divergentes():
+    """
+    As cópias da fórmula de preços dão o mesmo?
+
+    Existe em cinco sítios: precos.js e quatro páginas. Divergiram
+    quatro vezes num dia — e cada divergência dá um preço na
+    calculadora e outro no pagamento.
+
+    Isto não compara o código: compara os NÚMEROS. Uma fórmula
+    reescrita de outra maneira mas com os mesmos valores passa; uma
+    com um 3.5 onde as outras têm 1.45 não passa.
+    """
+    import re
+
+    paginas = {
+        'precos.js': 'precos.js',
+        'homepage': 'render-site/index.html',
+        'booking': 'render-site/booking/index.html',
+        'checkout': 'render-site/checkout/index.html',
+    }
+
+    encontradas = {}
+
+    for nome, caminho in paginas.items():
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        # a fórmula do resto do mundo
+        m = re.search(r'Math\.max\(25,\s*\((\d+(?:\.\d+)?)\s*\+\s*\w+\s*\*\s*(\d+(?:\.\d+)?)\)\s*\*\s*(\d+(?:\.\d+)?)', texto)
+
+        if m:
+            encontradas[nome] = (m.group(1), m.group(2), m.group(3))
+
+    if len(encontradas) < 2:
+        return
+
+    valores = set(encontradas.values())
+
+    if len(valores) > 1:
+        detalhe = '; '.join(
+            f'{nome}: {v[0]} + km*{v[1]} * {v[2]}'
+            for nome, v in encontradas.items()
+        )
+
+        erro('precos.js',
+             'a fórmula genérica diverge entre páginas — '
+             + detalhe +
+             '. Um preço na calculadora e outro no pagamento.')
+
+
+def classes_de_veiculo():
+    """
+    As classes que o site oferece são as que o servidor aceita?
+
+    A validação do checkout teve uma lista à mão que não batia com
+    a real: faltavam duas classes e tinha uma inventada. Quem
+    escolhesse "Van + Sedan" não conseguia pagar.
+    """
+    import re
+
+    pr = ler('precos.js')
+    if pr is None:
+        return
+
+    m = re.search(r'VEHICLE_CLASSES\s*=\s*\{', pr)
+    if not m:
+        return
+
+    i = m.end() - 1
+    prof, k = 0, i
+    while k < len(pr):
+        if pr[k] == '{':
+            prof += 1
+        elif pr[k] == '}':
+            prof -= 1
+            if prof == 0:
+                break
+        k += 1
+
+    fonte = set(re.findall(r'^\s+(\w+):\s*\{', pr[i:k+1], re.M))
+
+    for nome, caminho in [
+        ('booking', 'render-site/booking/index.html'),
+        ('checkout', 'render-site/checkout/index.html'),
+    ]:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        ids = set(re.findall(r"id:\s*'(\w+)'", texto))
+        ids |= set(re.findall(r'^\s+(\w+):\s*\{\s*name:', texto, re.M))
+
+        # só os que parecem classes
+        ids = {x for x in ids if x in fonte or x in
+               ('sedan', 'premium', 'van', 'van_sedan', 'two_vans', 'minibus')}
+
+        fora = ids - fonte
+
+        if fora:
+            erro(caminho,
+                 'oferece classes que o cálculo não conhece: '
+                 + ', '.join(sorted(fora)))
+
+
+def valores_por_omissao():
+    """
+    Um valor inicial que é um palpite.
+
+    O trip nascia com isPT: true, e uma rota em Dublin era cobrada
+    pela tabela do Algarve. O valor inicial de uma coisa que se vai
+    calcular é null.
+    """
+    import re
+
+    for caminho in ['render-site/booking/index.html',
+                    'render-site/checkout/index.html']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        m = re.search(r'var trip = \{[^}]*isPT:\s*(true|false)', texto)
+
+        if m:
+            erro(caminho,
+                 f'trip nasce com isPT: {m.group(1)}. Devia ser null — '
+                 'um palpite dá um preço errado em silêncio.')
+
+
+def rotas_sem_protecao():
+    """
+    Uma rota com await fora de try devolve HTML sem CORS.
+
+    O browser mostra "Failed to fetch", que não diz nada sobre a
+    causa. Aconteceu no checkout: quinze pontos desprotegidos.
+    """
+    import re
+
+    for caminho in ['server.js', 'server-drivers.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        if 'app.use((err, req, res, next)' not in texto:
+            erro(caminho,
+                 'sem apanhador global de erros — uma rota que lance '
+                 'responde sem CORS, e o browser diz "Failed to fetch".')
+
+
+def rpc_com_catch():
+    """
+    Um .catch() encadeado a um .rpc() do Supabase.
+
+    O construtor do Supabase é um "thenable": tem .then, e o await
+    funciona — mas nem todas as versões expõem .catch. A chamada
+    rebenta com "rpc(...).catch is not a function".
+
+    O pior é quando isso acontece DEPOIS do trabalho: o ticket
+    fecha, o evento processa-se, e só a resposta se perde. O
+    utilizador vê um erro e não sabe se pode repetir.
+
+    Usa try/catch à volta do await.
+    """
+    import re
+
+    for caminho in ['server.js', 'server-drivers.js', 'support.js',
+                    'partners.js', 'supabaseclient.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for m in re.finditer(r'\.rpc\([^;]{0,200}?\.catch\(', texto, re.S):
+            linha = texto[:m.start()].count('\n') + 1
+
+            erro(caminho,
+                 f'linha {linha}: .catch() encadeado a .rpc(). O construtor '
+                 'do Supabase nem sempre tem .catch — usa try/catch.')
+
+
+def main():
+    testes = [
+        ('sintaxe', sintaxe),
+        ('nomes duplicados', duplicados),
+        ('recursão acidental', recursao),
+        ('ids em falta', ids_em_falta),
+        ('colunas inventadas', colunas),
+        ('equilíbrios', equilibrios),
+        ('retornos SQL', retornos),
+        ('renames sem proteção', renames),
+
+        # As que nasceram do dia 10 de setembro, em que cinco
+        # cópias da fórmula de preços divergiram quatro vezes.
+        ('fórmulas divergentes', formulas_divergentes),
+        ('classes de veículo', classes_de_veiculo),
+        ('valores por omissão', valores_por_omissao),
+        ('rotas sem proteção', rotas_sem_protecao),
+        ('rpc com .catch', rpc_com_catch),
+    ]
+
+    for nome, fn in testes:
+        try:
+            fn()
+        except Exception as e:
+            avisos.append(f'[{nome}] a verificação falhou: {e}')
+
+    print()
+
+    if problemas:
+        print(f'PARA CORRIGIR ({len(problemas)})')
+        print()
+        for p in problemas:
+            print('  ' + p)
+        print()
+
+    if avisos:
+        print(f'para olhar ({len(avisos)})')
+        print()
+        for a in avisos:
+            print('  ' + a)
+        print()
+
+    if not problemas and not avisos:
+        print('  tudo limpo')
+        print()
+
+    # Só os problemas travam. Os avisos são para eu ler, não para
+    # bloquear — um aviso que trava tudo acaba por ser ignorado.
+    return 1 if problemas else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
