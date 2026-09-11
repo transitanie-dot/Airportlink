@@ -19,7 +19,22 @@ import {
 
   // Uma agência que se candidata, e uma conta de cliente nova.
   telegramNewAgency,
-  telegramNewAccount
+  telegramNewAccount,
+
+  /**
+   * Os alarmes que vigiam números plausíveis mas errados.
+   *
+   * Um preço de 26 euros numa viagem de 87 não dá erro nenhum:
+   * sai um número bonito. Estes três apanham-no.
+   */
+  telegramPrecoEstranho,
+  telegramPrecoDivergente,
+  telegramSemReservas,
+  telegramReservaIncompleta,
+  telegramArranque,
+
+  // O trabalho de fundo parou. Existia há semanas sem ser chamado.
+  telegramTickDown
 } from './telegram.js';
 
 /**
@@ -2688,12 +2703,53 @@ async function criarSessaoCheckout(req, res) {
       console.error('[price] MISMATCH: cliente viu', vistoPeloCliente,
         'servidor calculou', priceEUR.toFixed(2));
 
-      telegramTaskFailed('price mismatch',
-        `${booking.pickup} -> ${booking.dropoff}\n` +
-        `Client saw ${vistoPeloCliente} EUR, server calculated ` +
-        `${priceEUR.toFixed(2)} EUR (${distanceKm.toFixed(1)} km)`
-      ).catch(() => {});
+      telegramPrecoDivergente({
+        visto: vistoPeloCliente,
+        calculado: priceEUR,
+        km: distanceKm,
+        de: booking.pickup,
+        para: booking.dropoff
+      }).catch(() => {});
     }
+  }
+
+  /**
+   * E um preço que não faz sentido nenhum.
+   *
+   * Não há regra que diga qual é o preço certo, mas há limites que
+   * dizem que algo está errado.
+   *
+   * A 10 de setembro, uma viagem de 87 euros foi cobrada a 26
+   * porque a distância chegou a zero. O número saiu bonito e
+   * ninguém reparou — até um cliente perguntar.
+   *
+   * Estes três testes apanham os erros que dão números plausíveis:
+   * o preço mínimo numa viagem longa, um valor por quilómetro
+   * absurdo, e um total que não paga a gasolina.
+   */
+  const porKm = priceEUR / Math.max(distanceKm, 1);
+
+  let precoEstranho = null;
+
+  if (distanceKm > 20 && priceEUR <= 30) {
+    precoEstranho = 'Minimum fare on a long trip — distance may have been lost';
+  } else if (porKm < 0.8 && distanceKm > 10) {
+    precoEstranho = `Only ${porKm.toFixed(2)} EUR per km — too cheap to be right`;
+  } else if (porKm > 12) {
+    precoEstranho = `${porKm.toFixed(2)} EUR per km — too expensive to be right`;
+  }
+
+  if (precoEstranho) {
+    console.error('[price] ESTRANHO:', precoEstranho,
+      '| km:', distanceKm, '| EUR:', priceEUR.toFixed(2));
+
+    telegramPrecoEstranho({
+      km: Math.round(distanceKm * 10) / 10,
+      preco: priceEUR,
+      de: booking.pickup,
+      para: booking.dropoff,
+      motivo: precoEstranho
+    }).catch(() => {});
   }
 
   /**
@@ -4426,6 +4482,38 @@ app.post('/api/stripe-webhook', async (req, res) => {
       })
       .select()
       .single();
+
+    /**
+     * A reserva tem tudo o que precisa para acontecer?
+     *
+     * Uma reserva sem telefone é uma pessoa que não se consegue
+     * contactar no dia. Sem preço é uma que não se cobra. Sem
+     * distância é uma que foi cobrada pelo mínimo.
+     *
+     * Nada disto dá erro: a linha grava-se na mesma. E só se
+     * descobre na véspera da viagem, quando já é tarde.
+     */
+    if (savedBooking) {
+      const faltam = [];
+
+      if (!savedBooking.phone_number) faltam.push('phone');
+      if (!savedBooking.email) faltam.push('email');
+      if (!savedBooking.pickup || !savedBooking.dropoff) faltam.push('address');
+      if (!savedBooking.booking_date) faltam.push('date');
+      if (!savedBooking.booking_time) faltam.push('time');
+
+      const preco = Number(savedBooking.price_eur || savedBooking.price || 0);
+      if (!preco || preco <= 0) faltam.push('price');
+
+      const km = Number(savedBooking.distance_km || 0);
+      if (!km || km <= 0) faltam.push('distance');
+
+      if (faltam.length) {
+        console.error('[booking] incompleta:', savedBooking.id, faltam.join(', '));
+
+        telegramReservaIncompleta(savedBooking, faltam).catch(() => {});
+      }
+    }
 
     /**
      * A cascata arranca aqui.
@@ -6676,6 +6764,67 @@ app.post('/api/tasks/daily-emails', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
+  /**
+   * O trabalho de fundo ainda corre?
+   *
+   * O cron chama o support-tick de minuto a minuto. Se parar,
+   * ninguém é avisado de conversas à espera, as ofertas de viagem
+   * não avançam, e as disputas ficam por tratar.
+   *
+   * Nada disto dá erro: as coisas simplesmente deixam de
+   * acontecer. É o pior tipo de falha — a silenciosa.
+   *
+   * O telegramTickDown existia há semanas e nunca era chamado. O
+   * verificar.py apanhou-o.
+   */
+  try {
+    const { data: ultimo } = await supabase
+      .from('support_tick_log')
+      .select('ran_at')
+      .order('ran_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (ultimo?.ran_at) {
+      const minutos = Math.round((Date.now() - new Date(ultimo.ran_at)) / 60000);
+
+      // Uma hora sem correr: o cron parou ou o serviço adormeceu e
+      // ninguém o acordou.
+      if (minutos > 60) {
+        await telegramTickDown(minutos);
+      }
+    }
+  } catch (e) {
+    console.error('tick check:', e.message);
+  }
+
+  /**
+   * O site está a receber reservas?
+   *
+   * O alarme mais simples e o mais útil. Se algo estiver partido
+   * de uma maneira que não dá erro — a calculadora fechada, o
+   * botão morto, o checkout a recusar — nota-se pela ausência.
+   *
+   * A 10 de setembro a calculadora esteve horas a recusar toda a
+   * gente. Ninguém soube até um cliente tentar reservar.
+   *
+   * Um dia mau tem poucas reservas. Um dia partido tem zero.
+   */
+  try {
+    const desde = new Date(Date.now() - 18 * 3600 * 1000).toISOString();
+
+    const { count } = await supabase
+      .from('bookings')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', desde);
+
+    if (count === 0) {
+      await telegramSemReservas(18);
+    }
+  } catch (e) {
+    console.error('no-bookings check:', e.message);
+  }
+
   const out = {
     driver_details: 0, held: 0, no_driver: 0, reminders: 0,
     expiring: 0, expired: 0, unclaimed: 0, errors: []
@@ -7046,3 +7195,15 @@ app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
   await loadExchangeRates();
 });
+
+/**
+ * Avisar que o serviço arrancou.
+ *
+ * Não é um erro — mas quando algo parte, a primeira pergunta é
+ * sempre "o que mudou?". Um aviso a dizer que houve deploy dá a
+ * resposta sem ter de a procurar no Render.
+ *
+ * Silencioso: acontece a cada deploy e a cada vez que o plano
+ * gratuito acorda.
+ */
+telegramArranque('API principal').catch(() => {});
