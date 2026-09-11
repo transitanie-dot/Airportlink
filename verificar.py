@@ -884,6 +884,116 @@ def imports_entre_servicos():
                      'Pede à API por uma rota interna.')
 
 
+def imports_que_nao_existem():
+    """
+    Um import de um nome que o ficheiro não exporta.
+
+    O Node rebenta no arranque com "does not provide an export
+    named X" — e o serviço não sobe de todo.
+
+    Acontece sempre que se publica um ficheiro e não o outro: o
+    server.js pede uma função que a versão antiga do
+    emailService.js ainda não tem.
+
+    Correr isto antes de publicar apanha-o em dois segundos.
+    """
+    import re, os
+
+    for caminho in ['server.js', 'server-drivers.js', 'partners.js',
+                    'support.js', 'support-shared.js', 'emailclient.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for m in re.finditer(
+            r"import \{([^}]+)\} from '\./([\w.-]+)'", texto, re.S
+        ):
+            alvo = m.group(2)
+            destino = ler(alvo)
+
+            if destino is None:
+                continue
+
+            # os nomes importados, sem comentários
+            bloco = re.sub(r'//[^\n]*', '', m.group(1))
+            bloco = re.sub(r'/\*[\s\S]*?\*/', '', bloco)
+
+            nomes = set(
+                x.strip().split(' as ')[0].strip()
+                for x in bloco.split(',')
+                if x.strip() and re.fullmatch(r'[\w\s]+(?: as \w+)?', x.strip())
+            )
+
+            exportadas = set(re.findall(
+                r'export (?:async )?(?:function|const|let|var|class) (\w+)', destino
+            ))
+
+            # e as exportadas em bloco
+            for m2 in re.finditer(r'export \{([^}]+)\}', destino):
+                exportadas |= set(
+                    x.strip().split(' as ')[-1].strip()
+                    for x in re.sub(r'//[^\n]*', '', m2.group(1)).split(',')
+                    if x.strip()
+                )
+
+            falta = {n for n in nomes if n and n not in exportadas}
+
+            for n in sorted(falta):
+                erro(caminho,
+                     f'importa "{n}" de {alvo}, que não o exporta. '
+                     'O Node rebenta no arranque e o serviço não sobe.')
+
+
+def botoes_de_email():
+    """
+    Um botão de email sem endereço.
+
+    O molde lê cta.href. Metade dos emails foi escrita com
+    cta.url — e nesses o href saía vazio: o botão aparecia bonito
+    e não ia a lado nenhum.
+
+    Dez emails estiveram assim sem ninguém reparar, porque um
+    botão morto não dá erro nenhum: não rebenta, não avisa, e o
+    email chega com bom aspeto.
+
+    O molde passou a aceitar os dois nomes. Isto vigia o resto: um
+    cta sem endereço, ou com um endereço vazio.
+    """
+    import re
+
+    texto = ler('emailService.js')
+    if texto is None:
+        return
+
+    # o molde aceita os dois?
+    aceita_os_dois = re.search(
+        r'href="\$\{esc\(cta\.href \|\| cta\.url', texto
+    ) is not None
+
+    if not aceita_os_dois:
+        aviso('emailService.js',
+              'o molde lê só um nome do cta — se algum email usar o outro, '
+              'o botão sai sem endereço e ninguém repara.')
+
+    # e cada cta tem endereço?
+    for m in re.finditer(r'cta: \{([^}]{0,300})\}', texto, re.S):
+        bloco = m.group(1)
+
+        if not re.search(r'\b(url|href):', bloco):
+            linha = texto[:m.start()].count('\n') + 1
+
+            erro('emailService.js',
+                 f'linha {linha}: um botão de email sem url nem href — '
+                 'aparece no email e não vai a lado nenhum.')
+
+        # um endereço vazio é o mesmo que nenhum
+        if re.search(r"\b(url|href):\s*''", bloco):
+            linha = texto[:m.start()].count('\n') + 1
+
+            erro('emailService.js',
+                 f'linha {linha}: um botão de email com endereço vazio.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -907,6 +1017,8 @@ def main():
         ('cópias da fórmula', numeros_magicos_de_preco),
         ('alarmes ligados', alarmes_ligados),
         ('imports entre serviços', imports_entre_servicos),
+        ('imports inexistentes', imports_que_nao_existem),
+        ('botões de email', botoes_de_email),
     ]
 
     for nome, fn in testes:
