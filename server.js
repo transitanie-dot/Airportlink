@@ -35,7 +35,6 @@ import {
   telegramPrecoDivergente,
   telegramSemReservas,
   telegramReservaIncompleta,
-  telegramArranque,
 
   // O trabalho de fundo parou. Existia há semanas sem ser chamado.
   telegramTickDown
@@ -2816,6 +2815,20 @@ async function criarSessaoCheckout(req, res) {
    * outro, um dos dois está errado — e é melhor saber agora do
    * que pelo cliente.
    */
+  /**
+   * Comparar o público com o público.
+   *
+   * O checkout envia o preço que mostrou, e para uma agência esse
+   * é o PÚBLICO — a página não sabe da comissão, que é decidida
+   * aqui.
+   *
+   * O alarme comparava-o com o priceEUR, que já leva a comissão
+   * descontada. Uma agência com 15% dava sempre 15% de divergência
+   * e um alarme falso a cada reserva.
+   *
+   * O que interessa saber é se os dois lados calcularam a mesma
+   * TARIFA. A comissão é uma decisão nossa, não uma divergência.
+   */
   const vistoPeloCliente = Number(booking.price_eur) || 0;
 
   if (vistoPeloCliente > 0) {
@@ -2823,7 +2836,8 @@ async function criarSessaoCheckout(req, res) {
 
     if (desvioPreco > 0.05) {
       console.error('[price] MISMATCH: cliente viu', vistoPeloCliente,
-        'servidor calculou', priceEUR.toFixed(2));
+        'servidor calculou', priceEUR.toFixed(2),
+        agent ? `(agência, comissão ${commission}%)` : '');
 
       telegramPrecoDivergente({
         visto: vistoPeloCliente,
@@ -7593,13 +7607,12 @@ app.listen(PORT, async () => {
 });
 
 /**
- * Avisar que o serviço arrancou.
+ * O aviso de arranque saiu.
  *
- * Não é um erro — mas quando algo parte, a primeira pergunta é
- * sempre "o que mudou?". Um aviso a dizer que houve deploy dá a
- * resposta sem ter de a procurar no Render.
+ * O plano gratuito do Render adormece aos 15 minutos e acorda a
+ * cada visita — o que dava dezenas de avisos por dia, todos a
+ * dizer o mesmo.
  *
- * Silencioso: acontece a cada deploy e a cada vez que o plano
- * gratuito acorda.
+ * Um aviso que chega dezenas de vezes deixa de ser lido, e leva
+ * consigo os que interessam.
  */
-telegramArranque('API principal').catch(() => {});
