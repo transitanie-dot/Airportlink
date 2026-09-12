@@ -1955,6 +1955,48 @@ async function ensureGuestAccount(email, name, phone) {
     });
 
     if (error || !created?.user) {
+      /**
+       * A conta ja existe em auth.users mas nao em contacts.
+       *
+       * Acontece quando a linha do contacto foi apagada, ou
+       * quando a conta nasceu por outro caminho — um parceiro que
+       * depois reserva como cliente, por exemplo.
+       *
+       * Devolver null aqui era o pior dos dois mundos: a reserva
+       * seguia em frente e rebentava a apontar para um contacto
+       * que nao existe, com um "violates foreign key constraint"
+       * que nao diz nada sobre a causa.
+       *
+       * O que falta e a linha em contacts. Vamos busca-la ao
+       * auth.users e cria-la.
+       */
+      const jaExiste = /already been registered|already exists/i
+        .test(error?.message || '');
+
+      if (jaExiste) {
+        console.log('[guest] conta ja existe, a repor o contacto:', email);
+
+        const { data: lista } = await supabase.auth.admin.listUsers();
+
+        const u = (lista?.users || []).find(
+          (x) => x.email?.toLowerCase() === String(email).toLowerCase()
+        );
+
+        if (u) {
+          await supabase.from('contacts').upsert({
+            id: u.id,
+            email,
+            full_name: name || u.user_metadata?.full_name || null,
+            phone_number: phone || null,
+            is_admin: false
+          }, { onConflict: 'id' });
+
+          console.log('[guest] contacto reposto para', email);
+
+          return { userId: u.id, link: null };
+        }
+      }
+
       console.error('guest account failed:', error?.message);
       return null;
     }
@@ -2742,21 +2784,6 @@ async function criarSessaoCheckout(req, res) {
     return res.status(400).json({ error: 'Unsupported currency' });
   }
 
-  /**
-   * Se quem pede for um agente aprovado, aplica-se a margem dele.
-   * O browser não tem palavra nenhuma nisto.
-   *
-   * Resolvido AQUI, antes do cálculo do preço: o alarme de
-   * divergência mais abaixo usa o agent e a commission para
-   * escrever no registo, e usá-los antes de declarados rebentava
-   * o checkout inteiro com "Cannot access 'agent' before
-   * initialization" — um const só existe a partir da linha onde é
-   * declarado.
-   */
-  const requester = await getUserFromRequest(req);
-  const agent = await getApprovedAgent(requester);
-  const commission = agent ? agent.commission : 0;
-
   let distanceKm;
   let durationMinutes;
   let isPortugalRoute;
@@ -2987,8 +3014,11 @@ async function criarSessaoCheckout(req, res) {
    */
   const temNoite = isNightPickup(booking.booking_time || booking.time);
 
-  // A margem do agente foi resolvida acima, antes do cálculo do
-  // preço. Aqui só se aplica ao valor.
+  // Se quem pede for um agente aprovado, aplica-se a margem dele.
+  // O browser não tem palavra nenhuma nisto.
+  const requester = await getUserFromRequest(req);
+  const agent = await getApprovedAgent(requester);
+  const commission = agent ? agent.commission : 0;
   const netPriceEUR = priceEUR * (1 - commission / 100);
 
   const grossInCurrency = convertFromEUR(priceEUR, currency, rates);
@@ -3359,9 +3389,19 @@ async function repairBookingFromSession(session) {
     .eq('stripe_checkout_session_id', session.id)
     .maybeSingle();
 
-  // Já está completa: nada a fazer. O price_eur é a marca de que
-  // passou pelo webhook novo.
-  if (existing && existing.price_eur !== null && existing.booking_reference) {
+  /**
+   * Já está completa: nada a fazer.
+   *
+   * A condição pedia também um booking_reference — um campo que o
+   * webhook NUNCA grava. A reparação disparava em todas as
+   * reservas, e o log enchia-se de "incomplete booking, repairing"
+   * em reservas que estavam perfeitas.
+   *
+   * O que marca uma reserva completa é o price_eur, que só o
+   * webhook novo escreve, e o booking_id — a referência que o
+   * cliente vê no email: AL7289539.
+   */
+  if (existing && existing.price_eur !== null && existing.booking_id) {
     return;
   }
 
