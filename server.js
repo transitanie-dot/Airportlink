@@ -1933,6 +1933,83 @@ const VERIFY_REQUIRED = {
  * Devolve o link, ou null se a conta já existia (aí a pessoa já sabe
  * entrar e mandar-lhe um link de password seria estranho).
  */
+/**
+ * Garantir a linha de contacto, sem depender de indices.
+ *
+ * Os tres upserts que aqui havia usavam onConflict: 'email' ou
+ * 'id' — e o Postgres recusa isso quando a coluna nao tem indice
+ * unico, com um "no unique or exclusion constraint matching".
+ *
+ * O erro sai do supabase-js como um objeto de erro que ninguem
+ * verificava: a linha nao era escrita e a vida seguia, ate a
+ * reserva rebentar a apontar para um contacto que nao existe.
+ *
+ * Procurar-e-escrever nao precisa de indice nenhum. E uma
+ * consulta a mais e funciona sempre.
+ */
+async function garantirContacto({ id, email, nome, telefone, admin, extra }) {
+  if (!email) return null;
+
+  const limpo = String(email).trim();
+
+  const { data: existente } = await supabase
+    .from('contacts')
+    .select('id, full_name, phone_number')
+    .ilike('email', limpo)
+    .maybeSingle();
+
+  if (existente) {
+    /**
+     * Ja existe: so preenche o que estiver em branco.
+     *
+     * Um nome que o cliente escreveu numa reserva antiga vale
+     * mais do que o que vem agora vazio.
+     */
+    const patch = {};
+    if (nome && !existente.full_name) patch.full_name = nome;
+    if (telefone && !existente.phone_number) patch.phone_number = telefone;
+
+    Object.assign(patch, extra || {});
+
+    if (Object.keys(patch).length) {
+      await supabase.from('contacts').update(patch).eq('id', existente.id);
+    }
+
+    return existente.id;
+  }
+
+  const { data: criado, error } = await supabase
+    .from('contacts')
+    .insert({
+      id: id || undefined,
+      email: limpo,
+      full_name: nome || null,
+      phone_number: telefone || null,
+      is_admin: Boolean(admin),
+
+      // Campos que so alguns chamadores tem — as linguas
+      // preferidas do registo, por exemplo.
+      ...(extra || {})
+    })
+    .select('id')
+    .single();
+
+  if (error) {
+    // Corrida entre dois pedidos: alguem criou entretanto.
+    if (error.code === '23505') {
+      const { data: outra } = await supabase
+        .from('contacts').select('id').ilike('email', limpo).maybeSingle();
+      return outra?.id || null;
+    }
+
+    console.error('[contacts] nao consegui criar', limpo, error.message);
+    return null;
+  }
+
+  return criado?.id || null;
+}
+
+
 async function ensureGuestAccount(email, name, phone) {
   if (!email) return null;
 
@@ -1983,13 +2060,10 @@ async function ensureGuestAccount(email, name, phone) {
         );
 
         if (u) {
-          await supabase.from('contacts').upsert({
-            id: u.id,
-            email,
-            full_name: name || u.user_metadata?.full_name || null,
-            phone_number: phone || null,
-            is_admin: false
-          }, { onConflict: 'id' });
+          await garantirContacto({
+            id: u.id, email, nome: name || u.user_metadata?.full_name,
+            telefone: phone
+          });
 
           console.log('[guest] contacto reposto para', email);
 
@@ -2001,13 +2075,9 @@ async function ensureGuestAccount(email, name, phone) {
       return null;
     }
 
-    await supabase.from('contacts').upsert({
-      id: created.user.id,
-      email,
-      full_name: name || null,
-      phone_number: phone || null,
-      is_admin: false
-    }, { onConflict: 'email' });
+    await garantirContacto({
+      id: created.user.id, email, nome: name, telefone: phone
+    });
 
     const { data: linkData } = await supabase.auth.admin.generateLink({
       type: 'recovery',
@@ -2238,22 +2308,21 @@ app.post('/register', async (req, res) => {
       });
     }
 
-    const { error: contactError } = await supabase
-      .from('contacts')
-      .upsert({
-        id: authData.user.id,
-        full_name: name,
-        email,
-        phone_number: phone || null,
+    const idContacto = await garantirContacto({
+      id: authData.user.id,
+      email,
+      nome: name,
+      telefone: phone,
+      extra: {
         // Preferência, não garantia. No máximo duas: mais do que isso
         // deixa de ser uma preferência e passa a ser uma lista de desejos.
         preferred_languages: Array.isArray(preferred_languages) && preferred_languages.length
           ? preferred_languages.slice(0, 2)
-          : null,
-        is_admin: false
-      }, {
-        onConflict: 'email'
-      });
+          : null
+      }
+    });
+
+    const contactError = idContacto ? null : new Error('contact row missing');
 
     if (contactError) {
       console.error('Contacts upsert error:', contactError);
@@ -4050,18 +4119,20 @@ app.post('/api/agent/apply', async (req, res) => {
       });
     }
 
-    // O agente continua a ser uma pessoa: garantimos a linha em
-    // contacts, porque bookings.email aponta para lá.
-    const { error: contactError } = await supabase
-      .from('contacts')
-      .upsert({
-        id: user.id,
-        email: user.email,
-        full_name: representative_name || full_name || user.user_metadata?.full_name || null,
-        is_admin: false
-      }, {
-        onConflict: 'email'
-      });
+    /**
+     * O agente continua a ser uma pessoa.
+     *
+     * A linha em contacts tem de existir porque bookings.email
+     * aponta para la. Sem ela, a primeira reserva da agencia
+     * rebenta com um "violates foreign key constraint".
+     */
+    const contactoId = await garantirContacto({
+      id: user.id,
+      email: user.email,
+      nome: representative_name || full_name || user.user_metadata?.full_name
+    });
+
+    const contactError = contactoId ? null : new Error('contact row missing');
 
     if (contactError) throw contactError;
 
@@ -7289,6 +7360,117 @@ app.post('/api/internal/alert', async (req, res) => {
  *   /api/tasks/test-verify?email=x@y.com&kind=partner
  * ---------------------------------------------------------------
  */
+/**
+ * ---------------------------------------------------------------
+ * RECUPERAR UMA RESERVA QUE NAO FOI CRIADA
+ *
+ * O cliente pagou, o webhook correu, e o insert rebentou — por
+ * falta de contacto, por uma coluna em falta, pelo que for.
+ *
+ * O dinheiro esta no Stripe e nao ha reserva nenhuma. Isto vai
+ * buscar a sessao ao Stripe e reconstroi a reserva a partir dos
+ * metadados.
+ *
+ *   /api/tasks/rebuild?session=cs_live_xxxxx
+ *
+ * Ou, sem sessao, percorre os pagamentos das ultimas 48 horas e
+ * repara os que nao tem reserva:
+ *
+ *   /api/tasks/rebuild?since=48
+ * ---------------------------------------------------------------
+ */
+app.get('/api/tasks/rebuild', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const uma = String(req.query.session || '').trim();
+
+    if (uma) {
+      const session = await stripe.checkout.sessions.retrieve(uma);
+
+      if (!session) {
+        return res.status(404).json({ error: 'Sessao nao encontrada no Stripe.' });
+      }
+
+      await repairBookingFromSession(session);
+
+      const { data } = await supabase
+        .from('bookings')
+        .select('id, booking_id, email, price_eur')
+        .eq('stripe_checkout_session_id', uma)
+        .maybeSingle();
+
+      return res.json({
+        session: uma,
+        pago: session.payment_status,
+        reserva: data || null,
+        ok: Boolean(data)
+      });
+    }
+
+    /**
+     * Sem sessao: as ultimas horas.
+     *
+     * O Stripe devolve as sessoes por ordem inversa. Cem chegam
+     * para dois dias — mais do que isso e melhor ir ao painel
+     * deles.
+     */
+    const horas = Math.min(Number(req.query.since) || 48, 168);
+    const desde = Math.floor((Date.now() - horas * 3600 * 1000) / 1000);
+
+    const lista = await stripe.checkout.sessions.list({
+      limit: 100,
+      created: { gte: desde }
+    });
+
+    const out = { vistas: 0, pagas: 0, reparadas: [], ja_existiam: 0 };
+
+    for (const session of (lista.data || [])) {
+      out.vistas += 1;
+
+      if (session.payment_status !== 'paid' && session.mode !== 'setup') continue;
+      out.pagas += 1;
+
+      const { data: existe } = await supabase
+        .from('bookings')
+        .select('id')
+        .eq('stripe_checkout_session_id', session.id)
+        .maybeSingle();
+
+      if (existe) { out.ja_existiam += 1; continue; }
+
+      try {
+        await repairBookingFromSession(session);
+
+        const { data: nova } = await supabase
+          .from('bookings')
+          .select('booking_id, email')
+          .eq('stripe_checkout_session_id', session.id)
+          .maybeSingle();
+
+        out.reparadas.push({
+          session: session.id,
+          email: session.metadata?.email || session.customer_details?.email,
+          criada: Boolean(nova),
+          booking_id: nova?.booking_id || null
+        });
+      } catch (e) {
+        out.reparadas.push({ session: session.id, erro: e.message });
+      }
+    }
+
+    console.log('[rebuild]', JSON.stringify(out));
+
+    return res.json(out);
+  } catch (e) {
+    console.error('rebuild:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.get('/api/tasks/test-verify', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
