@@ -3447,10 +3447,35 @@ for (const chave of Object.keys(metadata)) {
  * estiver em falta.
  */
 async function repairBookingFromSession(session) {
-  if (!session || session.payment_status !== 'paid') return;
+  /**
+   * Paga OU com cartao guardado.
+   *
+   * Exigia payment_status === 'paid'. No "pagar depois" o Stripe
+   * corre em modo setup: guarda o cartao e nao cobra nada, e o
+   * payment_status fica 'no_payment_required' para sempre.
+   *
+   * A reparacao desistia em silencio em todas as reservas de pay
+   * later — que sao a maioria — e o cliente ficava com uma pagina
+   * de sucesso e nenhuma reserva.
+   */
+  if (!session) return;
+
+  const pago = session.payment_status === 'paid';
+  const guardou = session.mode === 'setup'
+    || session.payment_status === 'no_payment_required'
+    || Boolean(session.setup_intent);
+
+  if (!pago && !guardou) {
+    console.log('[repair] sessao sem pagamento nem cartao:', session.id);
+    return;
+  }
 
   const metadata = session.metadata || {};
-  if (!metadata.email && !metadata.passenger_email) return;
+
+  if (!metadata.email && !metadata.passenger_email) {
+    console.log('[repair] sessao sem email nos metadados:', session.id);
+    return;
+  }
 
   const { data: existing } = await supabase
     .from('bookings')
@@ -3534,8 +3559,31 @@ async function repairBookingFromSession(session) {
         distance_km: metadata.distance_km ? Number(metadata.distance_km) : null,
         duration_minutes: metadata.duration_minutes ? Number(metadata.duration_minutes) : null,
         notes: metadata.notes || null,
-        status: 'paid',
-        payment_status: 'paid'
+
+        /**
+         * O estado real, nao 'paid' sempre.
+         *
+         * Marcava tudo como pago, incluindo as reservas de pagar
+         * depois — em que o Stripe so guardou o cartao. Essas
+         * ficavam com paid sem nunca ter havido cobranca, e o
+         * charge-due nunca as ia buscar.
+         *
+         * Resultado: viagem feita e nunca cobrada.
+         */
+        status: pago ? 'paid' : 'confirmed',
+        payment_status: pago ? 'paid' : 'pending',
+
+        /**
+         * E o modo, que e o que o charge-due procura.
+         *
+         * Sem payment_mode: 'later', a tarefa que cobra 48 horas
+         * antes nunca encontra estas reservas — e a viagem
+         * acontece sem nunca ter sido cobrada.
+         */
+        payment_mode: pago ? 'now' : 'later',
+
+        stripe_setup_intent_id: session.setup_intent || null,
+        stripe_customer_id: session.customer || null
       }, { onConflict: 'stripe_checkout_session_id' })
       .select()
       .single();
