@@ -3187,6 +3187,9 @@ async function criarSessaoCheckout(req, res) {
     price: String(priceInCurrency.toFixed(2)),
     distance_km: String(distanceKm.toFixed(1)),
     duration_minutes: String(durationMinutes),
+
+    // Corrigido mais abaixo, depois de se saber se o pagar
+    // depois foi mesmo autorizado.
     status: 'paid',
     booked_by: agent ? agent.id : '',
     agent_commission_pct: agent ? String(commission) : '',
@@ -3263,6 +3266,18 @@ for (const chave of Object.keys(metadata)) {
 
   const payLater = wantsLater && eligibility.allowed;
 
+  /**
+   * O estado nos metadados, agora que se sabe.
+   *
+   * Ia para o Stripe a dizer "paid" mesmo numa reserva de pagar
+   * depois, em que nao saiu dinheiro nenhum.
+   *
+   * A base ficava certa — o webhook escreve 'confirmed' — mas
+   * quem fosse ao painel do Stripe investigar um problema lia
+   * "paid" e concluia o contrario do que aconteceu.
+   */
+  metadata.status = payLater ? 'confirmed' : 'paid';
+
   if (wantsLater && !eligibility.allowed) {
     return res.status(400).json({
       error: eligibility.reason || 'This booking has to be paid at checkout.'
@@ -3298,10 +3313,37 @@ for (const chave of Object.keys(metadata)) {
       // mode 'setup' guarda o cartão sem cobrar nada. O cliente vê a
       // página do Stripe, autentica o cartão se o banco exigir, e não
       // sai dinheiro nenhum da conta dele hoje.
+      /**
+       * Um Customer a serio, criado por nos.
+       *
+       * Com customer_email o Stripe guarda o cartao e NAO cria
+       * cliente nenhum — e o customer_creation nao existe no modo
+       * setup, so no payment.
+       *
+       * Sem cliente, o stripe_customer_id fica null e a cobranca
+       * de 48 horas antes nunca acontece: ela precisa de um
+       * cliente E de um metodo de pagamento.
+       *
+       * Viagem feita, cartao guardado, e zero cobrado.
+       *
+       * Criar o cliente aqui resolve, e ele passa a aparecer em
+       * Customers no painel do Stripe — que e onde se vai
+       * procurar quando algo corre mal.
+       */
+      const cliente = await stripe.customers.create({
+        email: booking.email,
+        name: booking.full_name || booking.passenger_name || undefined,
+        phone: fullPhone || undefined,
+        metadata: {
+          booking_id: metadata.booking_id || '',
+          created_via: 'pay_later_checkout'
+        }
+      });
+
       session = await stripe.checkout.sessions.create({
         mode: 'setup',
         payment_method_types: ['card'],
-        customer_email: booking.email,
+        customer: cliente.id,
 
         /**
          * O valor, escrito no topo do formulário.
@@ -7454,6 +7496,90 @@ app.post('/api/internal/alert', async (req, res) => {
  *   /api/tasks/rebuild?since=48
  * ---------------------------------------------------------------
  */
+/**
+ * ---------------------------------------------------------------
+ * LIGAR UM CARTAO GUARDADO A UM CLIENTE DO STRIPE
+ *
+ * As reservas de "pagar depois" criadas antes desta correcao tem
+ * o cartao guardado mas nenhum cliente — a sessao usava
+ * customer_email, que guarda o cartao e nao cria cliente nenhum.
+ *
+ * Sem cliente, o charge-due nao cobra: ele precisa dos dois.
+ *
+ *   /api/tasks/fix-customer?booking=AL1806844
+ *
+ * Ou todas as que estao nessa situacao:
+ *
+ *   /api/tasks/fix-customer?all=1
+ * ---------------------------------------------------------------
+ */
+app.get('/api/tasks/fix-customer', async (req, res) => {
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    let query = supabase
+      .from('bookings')
+      .select('id, booking_id, email, full_name, phone, stripe_payment_method_id, stripe_setup_intent_id, stripe_customer_id')
+      .eq('payment_mode', 'later')
+      .is('charged_at', null)
+      .is('stripe_customer_id', null)
+      .not('stripe_payment_method_id', 'is', null);
+
+    if (req.query.booking) {
+      query = query.eq('booking_id', String(req.query.booking));
+    }
+
+    const { data: reservas, error } = await query;
+    if (error) throw error;
+
+    const out = { encontradas: reservas?.length || 0, ligadas: [], falhas: [] };
+
+    for (const r of (reservas || [])) {
+      try {
+        /**
+         * Um cliente por reserva, com o cartao ligado.
+         *
+         * O attach pega no metodo de pagamento que ja existe e
+         * liga-o ao cliente novo. O cartao e o mesmo — o que muda
+         * e passar a haver a quem cobrar.
+         */
+        const cliente = await stripe.customers.create({
+          email: r.email,
+          name: r.full_name || undefined,
+          phone: r.phone || undefined,
+          metadata: { booking_id: r.booking_id, created_via: 'fix_customer' }
+        });
+
+        await stripe.paymentMethods.attach(r.stripe_payment_method_id, {
+          customer: cliente.id
+        });
+
+        const { error: erroGravar } = await supabase
+          .from('bookings')
+          .update({ stripe_customer_id: cliente.id })
+          .eq('id', r.id);
+
+        if (erroGravar) throw erroGravar;
+
+        out.ligadas.push({ booking: r.booking_id, customer: cliente.id });
+
+        console.log('[fix-customer]', r.booking_id, '->', cliente.id);
+      } catch (e) {
+        out.falhas.push({ booking: r.booking_id, erro: e.message });
+        console.error('[fix-customer]', r.booking_id, e.message);
+      }
+    }
+
+    return res.json(out);
+  } catch (e) {
+    console.error('fix-customer:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.get('/api/tasks/rebuild', async (req, res) => {
   if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -8068,10 +8194,33 @@ app.post('/api/tasks/charge-due', async (req, res) => {
           updated_at: new Date().toISOString()
         }).eq('id', booking.id);
 
-        await supabase.from('charge_attempts').insert({
-          booking_id: booking.id, attempt_no: attemptNo, outcome: 'succeeded',
-          amount: Number(booking.price || 0), currency, stripe_id: intent.id
-        });
+        /**
+         * O registo da cobranca, com o erro lido.
+         *
+         * Se este insert falhar em silencio, ficas com dinheiro
+         * cobrado no Stripe e nenhum registo de o teres cobrado —
+         * e a proxima passagem do charge-due pode tentar outra
+         * vez.
+         *
+         * A cobranca ja aconteceu e nao se desfaz. O que se pode
+         * fazer e gritar.
+         */
+        const { error: erroRegisto } = await supabase
+          .from('charge_attempts').insert({
+            booking_id: booking.id, attempt_no: attemptNo, outcome: 'succeeded',
+            amount: Number(booking.price || 0), currency, stripe_id: intent.id
+          });
+
+        if (erroRegisto) {
+          console.error('[charge] cobrado mas sem registo:',
+            booking.booking_id, intent.id, erroRegisto.message);
+
+          telegramTaskFailed('charge registado',
+            `${booking.booking_id} foi COBRADO no Stripe (${intent.id}) mas o ` +
+            `registo falhou: ${erroRegisto.message}. Confirmar antes de ` +
+            'qualquer nova tentativa.'
+          ).catch(() => {});
+        }
 
         results.charged += 1;
         console.log('Scheduled charge succeeded:', booking.booking_id || booking.id);
