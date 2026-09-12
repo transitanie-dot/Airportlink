@@ -2742,6 +2742,21 @@ async function criarSessaoCheckout(req, res) {
     return res.status(400).json({ error: 'Unsupported currency' });
   }
 
+  /**
+   * Se quem pede for um agente aprovado, aplica-se a margem dele.
+   * O browser não tem palavra nenhuma nisto.
+   *
+   * Resolvido AQUI, antes do cálculo do preço: o alarme de
+   * divergência mais abaixo usa o agent e a commission para
+   * escrever no registo, e usá-los antes de declarados rebentava
+   * o checkout inteiro com "Cannot access 'agent' before
+   * initialization" — um const só existe a partir da linha onde é
+   * declarado.
+   */
+  const requester = await getUserFromRequest(req);
+  const agent = await getApprovedAgent(requester);
+  const commission = agent ? agent.commission : 0;
+
   let distanceKm;
   let durationMinutes;
   let isPortugalRoute;
@@ -2972,11 +2987,8 @@ async function criarSessaoCheckout(req, res) {
    */
   const temNoite = isNightPickup(booking.booking_time || booking.time);
 
-  // Se quem pede for um agente aprovado, aplica-se a margem dele.
-  // O browser não tem palavra nenhuma nisto.
-  const requester = await getUserFromRequest(req);
-  const agent = await getApprovedAgent(requester);
-  const commission = agent ? agent.commission : 0;
+  // A margem do agente foi resolvida acima, antes do cálculo do
+  // preço. Aqui só se aplica ao valor.
   const netPriceEUR = priceEUR * (1 - commission / 100);
 
   const grossInCurrency = convertFromEUR(priceEUR, currency, rates);
