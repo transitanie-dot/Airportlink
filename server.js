@@ -3460,6 +3460,33 @@ async function repairBookingFromSession(session) {
    */
   if (!session) return;
 
+  /**
+   * A sessao tem de estar COMPLETA.
+   *
+   * Uma sessao de checkout nasce quando a pessoa carrega em
+   * "continuar" — antes de ver o formulario do cartao. Se ela
+   * fechar a janela nessa altura, a sessao fica no Stripe como
+   * "open" ou "expired" e nunca chega a haver cliente.
+   *
+   * O rebuild criava reservas a partir dessas: tres reservas de
+   * clientes que nunca reservaram nada. Foi preciso apaga-las a
+   * mao.
+   *
+   * O status da sessao e o unico campo que distingue "reservou"
+   * de "pensou em reservar".
+   */
+  if (session.status !== 'complete') {
+    console.log('[repair] sessao nao completada:', session.id,
+      '| status:', session.status);
+    return;
+  }
+
+  /**
+   * E depois: pagou, ou guardou o cartao.
+   *
+   * No "pagar depois" o Stripe corre em modo setup e o
+   * payment_status fica 'no_payment_required' para sempre.
+   */
   const pago = session.payment_status === 'paid';
   const guardou = session.mode === 'setup'
     || session.payment_status === 'no_payment_required'
@@ -7477,6 +7504,10 @@ app.get('/api/tasks/rebuild', async (req, res) => {
 
     for (const session of (lista.data || [])) {
       out.vistas += 1;
+
+      // Só as completas: uma sessao aberta ou expirada e alguem
+      // que desistiu, nao alguem que reservou.
+      if (session.status !== 'complete') continue;
 
       if (session.payment_status !== 'paid' && session.mode !== 'setup') continue;
       out.pagas += 1;
