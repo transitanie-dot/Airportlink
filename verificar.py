@@ -1610,6 +1610,107 @@ def distancia_do_browser():
              'distance_km: 1 numa rota longa paga o minimo.')
 
 
+def identidade_do_browser():
+    """
+    Um campo de identidade que vem do pedido.
+
+    O user_id vinha de booking.user_id. A politica de leitura da
+    bookings inclui "auth.uid() = user_id" — quem pusesse o id de
+    outra pessoa criava uma reserva que ESSA pessoa conseguia ler,
+    com moradas, telefone e numero de voo.
+
+    Identidade vem do JWT. Sempre.
+    """
+    import re
+
+    PERIGOSOS = ['user_id', 'booked_by', 'agent_id', 'partner_id',
+                 'is_admin', 'commission']
+
+    for caminho in ['server.js', 'partners.js', 'support.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for campo in PERIGOSOS:
+            for m in re.finditer(
+                r'\b' + campo + r':\s*(booking|req\.body|body)\.', texto
+            ):
+                linha = texto[:m.start()].count('\n') + 1
+
+                erro(caminho,
+                     f'linha {linha}: {campo} vem do pedido. '
+                     'Identidade e permissoes vem do JWT — do contrario '
+                     'qualquer pessoa escreve o que quiser.')
+
+
+def volta_com_rota_propria():
+    """
+    A perna de volta com moradas escolhidas pelo browser.
+
+    O preco da volta e calculado a partir da distancia da IDA. Se
+    o browser puder escolher outras moradas, paga uma viagem curta
+    e faz uma longa:
+
+      ida:    Faro -> Albufeira      38 km,  47 EUR
+      volta:  Albufeira -> Lisboa   280 km, 370 EUR
+      cobrado: 94 EUR
+
+    A volta e a ida invertida. O browser escolhe a data.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    for m in re.finditer(
+        r'return_leg\.(pickup|dropoff)', texto
+    ):
+        linha = texto[:m.start()].count('\n') + 1
+
+        erro('server.js',
+             f'linha {linha}: a volta usa return_leg.{m.group(1)} do '
+             'browser, e o preco vem da distancia da ida. Uma volta para '
+             'outro sitio paga o preco da ida.')
+
+
+def data_invalida_passa():
+    """
+    Uma verificacao de data que so corre se a data for valida.
+
+    O padrao "if (Number.isFinite(d.getTime()) && d < limite)" deixa
+    passar tudo o que nao e uma data: um campo vazio, "abc", um mes
+    13. A primeira metade e falsa e o if nao entra.
+
+    A reserva fica com uma data que ninguem consegue ler — e
+    nenhuma tarefa a encontra: nem a cobranca, nem os lembretes,
+    nem a distribuicao.
+    """
+    import re
+
+    for caminho in ['server.js', 'partners.js', 'support.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for m in re.finditer(
+            r'if\s*\(\s*Number\.isFinite\((\w+)\.getTime\(\)\)\s*&&', texto
+        ):
+            var = m.group(1)
+
+            # ha uma recusa explicita do invalido antes?
+            antes = texto[max(0, m.start() - 700):m.start()]
+
+            if re.search(r'!Number\.isFinite\(' + var + r'\.getTime', antes):
+                continue
+
+            linha = texto[:m.start()].count('\n') + 1
+
+            erro(caminho,
+                 f'linha {linha}: a verificacao de {var} so corre se a data '
+                 'for valida. Uma data invalida passa sem ser vista.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -1646,6 +1747,9 @@ def main():
         ('status mentiroso no stripe', status_mentiroso_no_stripe),
         ('usado antes de existir', usado_antes_de_existir),
         ('distancia do browser', distancia_do_browser),
+        ('identidade do browser', identidade_do_browser),
+        ('volta com rota propria', volta_com_rota_propria),
+        ('data invalida passa', data_invalida_passa),
     ]
 
     for nome, fn in testes:
