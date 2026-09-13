@@ -3019,8 +3019,26 @@ async function criarSessaoCheckout(req, res) {
 
   if (vistoPeloCliente > 0) {
     const desvioPreco = Math.abs(vistoPeloCliente - priceEUR) / priceEUR;
+    const desvioEuros = Math.abs(vistoPeloCliente - priceEUR);
 
-    if (desvioPreco > 0.05) {
+    /**
+     * Cinco por cento OU dez euros.
+     *
+     * Só a percentagem deixava passar o que mais importa: 23 euros
+     * de diferenca numa viagem de 500 sao 4,6% e nao avisavam,
+     * enquanto um euro numa de 24 sao 4% e tambem nao.
+     *
+     * A percentagem apanha os erros de formula; o valor absoluto
+     * apanha os que doem. Um deles chega.
+     *
+     * E os dois euros de piso tiram o ruido do arredondamento:
+     * a pagina arredonda e o servidor nao, e isso da sempre
+     * cinquenta centimos de diferenca.
+     */
+    const vale = (desvioPreco > 0.05 || desvioEuros >= 10)
+                 && desvioEuros >= 2;
+
+    if (vale) {
       /**
        * Sem mencionar a agencia aqui.
        *
@@ -3062,11 +3080,20 @@ async function criarSessaoCheckout(req, res) {
 
   let precoEstranho = null;
 
+  /**
+   * Abaixo de 3 km nao se avalia o preco por km.
+   *
+   * O minimo de 24 euros existe precisamente para as viagens
+   * curtas: um transfer de 1 km da 24 EUR/km, e isso nao e um
+   * erro — e o minimo a fazer o seu trabalho.
+   *
+   * Avisar sobre isso e avisar sobre uma regra que nos escrevemos.
+   */
   if (distanceKm > 20 && priceEUR <= 30) {
     precoEstranho = 'Minimum fare on a long trip — distance may have been lost';
   } else if (porKm < 0.8 && distanceKm > 10) {
     precoEstranho = `Only ${porKm.toFixed(2)} EUR per km — too cheap to be right`;
-  } else if (porKm > 12) {
+  } else if (porKm > 12 && distanceKm >= 3) {
     precoEstranho = `${porKm.toFixed(2)} EUR per km — too expensive to be right`;
   }
 
