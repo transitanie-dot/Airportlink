@@ -3021,9 +3021,18 @@ async function criarSessaoCheckout(req, res) {
     const desvioPreco = Math.abs(vistoPeloCliente - priceEUR) / priceEUR;
 
     if (desvioPreco > 0.05) {
+      /**
+       * Sem mencionar a agencia aqui.
+       *
+       * O agent so e procurado mais abaixo, depois de o preco
+       * estar calculado — e usa-lo aqui dava "Cannot access
+       * 'agent' before initialization", que rebenta o checkout
+       * inteiro.
+       *
+       * Uma linha de log a mais nao vale uma reserva perdida.
+       */
       console.error('[price] MISMATCH: cliente viu', vistoPeloCliente,
-        'servidor calculou', priceEUR.toFixed(2),
-        agent ? `(agência, comissão ${commission}%)` : '');
+        'servidor calculou', priceEUR.toFixed(2));
 
       telegramPrecoDivergente({
         visto: vistoPeloCliente,
