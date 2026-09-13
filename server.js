@@ -2918,9 +2918,30 @@ async function criarSessaoCheckout(req, res) {
     if (desvio > 0.25) {
       console.warn('distance mismatch:', kmDoCliente, 'vs', distanceKm,
         booking.pickup, '->', booking.dropoff);
-    }
 
-    distanceKm = kmDoCliente;
+      /**
+       * Acima de 25% de diferenca, vale a MEDIDA.
+       *
+       * Isto avisava e usava o numero do cliente na mesma. Um
+       * pedido com distance_km: 1 numa rota de 300 km pagava o
+       * minimo de 24 euros — e a viagem acontecia na mesma.
+       *
+       * Nao e preciso ma intencao: um campo que fica a "..."
+       * enquanto o mapa calcula ja o fez uma vez hoje, e deu 26
+       * euros numa viagem de 87.
+       *
+       * Ate 25%, o do cliente conta: e o preco que ele viu e
+       * aceitou, e o Google devolve rotas diferentes conforme o
+       * transito.
+       */
+      telegramTaskFailed('distance mismatch',
+        `${booking.pickup} -> ${booking.dropoff}\n` +
+        `O browser enviou ${kmDoCliente} km, o Google mediu ` +
+        `${distanceKm.toFixed(1)} km. Usada a medida.`
+      ).catch(() => {});
+    } else {
+      distanceKm = kmDoCliente;
+    }
   }
 
   /**
