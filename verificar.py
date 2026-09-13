@@ -1185,6 +1185,431 @@ def campos_inventados():
                  'O valor e undefined e nao da erro nenhum.')
 
 
+def upsert_sem_indice():
+    """
+    Um upsert com onConflict numa coluna sem indice unico.
+
+    O Postgres recusa com "no unique or exclusion constraint
+    matching the ON CONFLICT specification" — e o supabase-js
+    devolve isso como um objeto de erro que ninguem verifica.
+
+    A linha nao e escrita, e a vida segue ate outra coisa rebentar
+    a apontar para ela. Foi assim que uma reserva falhou com
+    "violates foreign key constraint": o contacto nunca tinha sido
+    criado.
+
+    As colunas que sabemos nao ter indice unico.
+    """
+    import re
+
+    SEM_INDICE = {
+        'contacts': ['email'],
+    }
+
+    for caminho in ['server.js', 'server-drivers.js', 'partners.js',
+                    'support.js', 'support-shared.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for tabela, colunas in SEM_INDICE.items():
+            for m in re.finditer(
+                r"from\('" + tabela + r"'\)\s*\.upsert\([\s\S]{0,400}?onConflict:\s*'(\w+)'",
+                texto
+            ):
+                coluna = m.group(1)
+
+                if coluna not in colunas:
+                    continue
+
+                linha = texto[:m.start()].count('\n') + 1
+
+                erro(caminho,
+                     f'linha {linha}: upsert em {tabela} com '
+                     f"onConflict: '{coluna}', e essa coluna nao tem indice "
+                     'unico. O Postgres recusa e a linha nao e escrita.')
+
+
+def erro_ignorado_do_supabase():
+    """
+    Uma escrita no Supabase cujo erro ninguem le.
+
+    O supabase-js nao lanca: devolve { data, error }. Uma escrita
+    que falha sem ninguem olhar para o error passa por bem
+    sucedida — e o problema aparece tres passos a frente, noutra
+    operacao, com uma mensagem que nao diz a causa.
+
+    Isto procura insert, update, upsert e delete cujo resultado
+    nao e guardado em lado nenhum.
+    """
+    import re
+
+    for caminho in ['server.js', 'server-drivers.js', 'partners.js',
+                    'support.js', 'support-shared.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        # Os comentarios sao substituidos por espacos do mesmo
+        # tamanho, e nao apagados: assim o numero de linha que
+        # calculamos e o do ficheiro, e nao o de um texto
+        # encolhido.
+        def brancos(m):
+            return re.sub(r'[^\n]', ' ', m.group(0))
+
+        codigo = re.sub(r'/\*[\s\S]*?\*/', brancos, texto)
+        codigo = re.sub(r'//[^\n]*', brancos, codigo)
+
+        for m in re.finditer(
+            r"(^|\n)\s*await supabase\s*\.from\('(\w+)'\)\s*"
+            r"\.(insert|update|upsert|delete)\(",
+            codigo
+        ):
+            # Guardado numa variavel? Entao o erro pode ser lido.
+            antes = codigo[max(0, m.start() - 40):m.start() + 10]
+            if '=' in antes or 'return' in antes:
+                continue
+
+            linha = codigo[:m.start()].count('\n') + 1
+            tabela = m.group(2)
+            operacao = m.group(3)
+
+            # Um insert que falha perde a linha inteira; um update
+            # que marca uma data perde uma data. Sao ambos erros,
+            # mas so o primeiro perde uma reserva.
+            grave = operacao in ('insert', 'upsert') or tabela in (
+                'bookings', 'contacts', 'driver_partners'
+            ) and operacao == 'delete'
+
+            if grave:
+                erro(caminho,
+                     f'linha {linha}: {operacao} em {tabela} sem ler o error. '
+                     'Se falhar, a linha nao e escrita e ninguem sabe — '
+                     'ate outra coisa rebentar a apontar para ela.')
+            else:
+                aviso(caminho,
+                      f'linha {linha}: {operacao} em {tabela} sem ler o error.')
+
+
+def sessao_stripe_incompleta():
+    """
+    Uma reserva construida a partir de uma sessao do Stripe sem
+    verificar se ela foi completada.
+
+    Uma sessao de checkout nasce quando a pessoa carrega em
+    "continuar" — antes de ver o formulario do cartao. Se ela
+    fechar a janela nessa altura, a sessao fica como "open" ou
+    "expired" e nunca houve reserva.
+
+    Sem verificar o status, cria-se uma reserva de alguem que
+    desistiu. Aconteceu com tres, e foi preciso apaga-las a mao.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    # As funcoes que leem uma sessao e escrevem uma reserva
+    for m in re.finditer(r'(async )?function (\w*[Ss]ession\w*|repair\w+)\s*\(', texto):
+        nome = m.group(2)
+        i = m.start()
+
+        prof, j = 0, texto.index('{', i)
+        k = j
+        while k < len(texto):
+            if texto[k] == '{':
+                prof += 1
+            elif texto[k] == '}':
+                prof -= 1
+                if prof == 0:
+                    break
+            k += 1
+
+        corpo = texto[i:k]
+
+        # escreve em bookings?
+        if not re.search(r"from\('bookings'\)\s*\.(insert|upsert)", corpo):
+            continue
+
+        if "session.status" not in corpo:
+            erro('server.js',
+                 f'{nome}() cria uma reserva a partir de uma sessao do '
+                 'Stripe sem verificar session.status. Uma sessao "open" ou '
+                 '"expired" e alguem que desistiu, nao alguem que reservou.')
+
+
+def stripe_setup_sem_cliente():
+    """
+    Uma sessao de checkout em modo setup sem Customer.
+
+    O customer_email guarda o cartao e NAO cria cliente nenhum. O
+    stripe_customer_id fica null — e a cobranca de 48 horas antes
+    precisa de um cliente E de um metodo de pagamento.
+
+    Viagem feita, cartao guardado, e zero cobrado. Foi assim com
+    tres reservas ate alguem reparar.
+
+    O customer_creation nao serve: so existe no modo payment. O
+    cliente tem de ser criado a mao antes da sessao.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    for m in re.finditer(r"mode:\s*'setup'", texto):
+        # O bloco da sessao, a volta
+        ini = max(0, m.start() - 600)
+        fim = min(len(texto), m.start() + 900)
+        bloco = texto[ini:fim]
+
+        cria = 'stripe.customers.create' in bloco
+        usa = re.search(r'customer:\s*\w+\.id|customer:\s*cliente', bloco)
+
+        if cria and usa:
+            continue
+
+        linha = texto[:m.start()].count('\n') + 1
+
+        erro('server.js',
+             f'linha {linha}: sessao em mode setup sem criar Customer. '
+             'O cartao fica guardado sem cliente, e o charge-due nunca '
+             'consegue cobrar.')
+
+
+def cobranca_sem_o_que_precisa():
+    """
+    A cobranca agendada precisa de tres coisas na reserva.
+
+    O customer, o metodo de pagamento, e o modo. Se o checkout nao
+    gravar qualquer uma delas, a reserva nunca e cobrada — e nada
+    no ecra diz isso.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    # O que o charge-due exige
+    i = texto.find("'/api/tasks/charge-due'")
+    if i < 0:
+        return
+
+    prof, j = 0, texto.index('{', texto.index('async', i))
+    k = j
+    while k < len(texto):
+        if texto[k] == '{':
+            prof += 1
+        elif texto[k] == '}':
+            prof -= 1
+            if prof == 0:
+                break
+        k += 1
+
+    cobranca = texto[i:k]
+
+    exigidos = []
+    for campo in ['stripe_customer_id', 'stripe_payment_method_id',
+                  'payment_mode']:
+        if campo in cobranca:
+            exigidos.append(campo)
+
+    # E o que o webhook grava
+    i2 = texto.find('const bookingRow')
+    if i2 < 0:
+        return
+
+    prof, j2 = 0, texto.index('{', i2)
+    k2 = j2
+    while k2 < len(texto):
+        if texto[k2] == '{':
+            prof += 1
+        elif texto[k2] == '}':
+            prof -= 1
+            if prof == 0:
+                break
+        k2 += 1
+
+    gravados = texto[i2:k2]
+
+    for campo in exigidos:
+        if campo not in gravados:
+            erro('server.js',
+                 f'o charge-due exige {campo} e o webhook nao o grava. '
+                 'A reserva fica por cobrar para sempre.')
+
+
+def status_mentiroso_no_stripe():
+    """
+    Um metadado a dizer "paid" numa reserva de pagar depois.
+
+    A base fica certa — o webhook escreve 'confirmed' — mas quem
+    for ao painel do Stripe investigar um problema le "paid" e
+    conclui o contrario do que aconteceu.
+
+    O metadado tem de ser escrito DEPOIS de se saber se o pagar
+    depois foi autorizado.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    # o metadata.status fixo em 'paid' sem correcao a seguir
+    m = re.search(r"^\s*status:\s*'paid',\s*$", texto, re.M)
+
+    if not m:
+        return
+
+    corrige = 'metadata.status = payLater' in texto
+
+    if not corrige:
+        linha = texto[:m.start()].count('\n') + 1
+
+        aviso('server.js',
+              f'linha {linha}: o metadado status vai sempre como "paid", '
+              'mesmo no pagar depois. Quem investigar no Stripe le o '
+              'contrario do que aconteceu.')
+
+
+def usado_antes_de_existir():
+    """
+    Uma variavel usada antes da linha que a declara.
+
+    Com const e let, isso e um TDZ error: "Cannot access X before
+    initialization". Nao e um aviso — e uma excecao que rebenta a
+    funcao inteira.
+
+    Aconteceu num alarme de preco: o log mencionava a agencia, e o
+    agent so era procurado quarenta linhas abaixo. O checkout
+    deixou de funcionar para toda a gente.
+
+    A sintaxe passa. So rebenta a correr.
+    """
+    import re
+
+    def limpar(t):
+        t = re.sub(r'/\*[\s\S]*?\*/',
+                   lambda m: re.sub(r'[^\n]', ' ', m.group(0)), t)
+        t = re.sub(r'//[^\n]*', lambda m: ' ' * len(m.group(0)), t)
+        t = re.sub(r"'(?:[^'\\]|\\.)*'",
+                   lambda m: "'" + ' ' * (len(m.group(0)) - 2) + "'", t)
+        t = re.sub(r'"(?:[^"\\]|\\.)*"',
+                   lambda m: '"' + ' ' * (len(m.group(0)) - 2) + '"', t)
+        t = re.sub(r'`(?:[^`\\]|\\.)*`',
+                   lambda m: '`' + ' ' * (len(m.group(0)) - 2) + '`', t)
+        return t
+
+    for caminho in ['server.js', 'server-drivers.js', 'partners.js',
+                    'support.js', 'support-shared.js']:
+        texto = ler(caminho)
+        if texto is None:
+            continue
+
+        for m in re.finditer(r'(?:async )?function (\w+)\s*\(', texto):
+            nome = m.group(1)
+            i2 = m.start()
+
+            prof, j = 0, texto.index('{', i2)
+            k = j
+            while k < len(texto):
+                if texto[k] == '{':
+                    prof += 1
+                elif texto[k] == '}':
+                    prof -= 1
+                    if prof == 0:
+                        break
+                k += 1
+
+            if k - i2 < 400:
+                continue
+
+            corpo = limpar(texto[i2:k])
+
+            # as constantes declaradas no corpo
+            for d in re.finditer(r'\n\s*const (\w+)\s*=', corpo):
+                var = d.group(1)
+
+                if len(var) < 4:
+                    continue
+
+                # usada antes?
+                antes = corpo[:d.start()]
+
+                # o parametro da funcao tem o mesmo nome? entao e outra coisa
+                params = re.search(r'\(([^)]*)\)', corpo[:corpo.index('{')])
+                if params and re.search(r'\b' + var + r'\b', params.group(1)):
+                    continue
+
+                # A mesma variavel pode ser declarada duas vezes em
+                # blocos diferentes — dentro de um if, de um for. Cada
+                # bloco tem o seu, e o de cima nao e o de baixo.
+                #
+                # Se o nome aparecer num const anterior, ha dois
+                # blocos e nao ha erro nenhum.
+                if re.search(r'\bconst ' + var + r'\s*=', antes):
+                    continue
+
+                uso = re.search(r'(?<![\w.$])' + var + r'(?![\w:])', antes)
+
+                if uso:
+                    linha = texto[:i2].count('\n') + antes[:uso.start()].count('\n') + 1
+
+                    erro(caminho,
+                         f'linha {linha}: {nome}() usa "{var}" antes do const '
+                         'que o declara. Isso rebenta a funcao inteira com '
+                         '"Cannot access before initialization".')
+                    break
+
+
+def distancia_do_browser():
+    """
+    A distancia enviada pelo browser, usada sem limite.
+
+    O servidor mede a rota no Google e depois usa a que o browser
+    mandou. Sem um limite, um pedido com distance_km: 1 numa rota
+    de 300 km paga o minimo — e a viagem acontece na mesma.
+
+    Nao e preciso ma intencao: um campo que fica a "..." enquanto
+    o mapa calcula ja deu 26 euros numa viagem de 87.
+
+    O que se procura: o aviso existe e o valor e usado a seguir,
+    sem condicao.
+    """
+    import re
+
+    texto = ler('server.js')
+    if texto is None:
+        return
+
+    i2 = texto.find('distance mismatch')
+    if i2 < 0:
+        return
+
+    # o que vem depois do aviso
+    bloco = texto[i2:i2 + 900]
+
+    # atribuicao sem estar dentro de um else
+    atribui = re.search(r'distanceKm\s*=\s*kmDoCliente', bloco)
+
+    if not atribui:
+        return
+
+    antes = bloco[:atribui.start()]
+
+    if 'else' not in antes:
+        linha = texto[:i2].count('\n') + 1
+
+        erro('server.js',
+             f'linha {linha}: o aviso de distance mismatch dispara e a '
+             'distancia do browser e usada na mesma. Um pedido com '
+             'distance_km: 1 numa rota longa paga o minimo.')
+
+
 def main():
     testes = [
         ('sintaxe', sintaxe),
@@ -1213,6 +1638,14 @@ def main():
         ('tabelas de preço', tabelas_de_preco),
         ('origens do CORS', origens_permitidas),
         ('campos inventados', campos_inventados),
+        ('upsert sem indice', upsert_sem_indice),
+        ('erros do supabase ignorados', erro_ignorado_do_supabase),
+        ('sessao do stripe incompleta', sessao_stripe_incompleta),
+        ('setup sem cliente', stripe_setup_sem_cliente),
+        ('cobranca sem o que precisa', cobranca_sem_o_que_precisa),
+        ('status mentiroso no stripe', status_mentiroso_no_stripe),
+        ('usado antes de existir', usado_antes_de_existir),
+        ('distancia do browser', distancia_do_browser),
     ]
 
     for nome, fn in testes:
