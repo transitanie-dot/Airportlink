@@ -2845,7 +2845,20 @@ async function criarSessaoCheckout(req, res) {
     return res.status(400).json({ error: 'A name is needed for the booking.' });
   }
 
-  const passengers = parseInt(booking.passengers, 10) || 1;
+  /**
+   * Entre um e dezasseis passageiros.
+   *
+   * O parseInt aceitava qualquer coisa: 999, -5, 1e10. O preco
+   * trava nos dezasseis — a maior viatura — por isso nao havia
+   * ganho em mentir, mas a reserva ficava com "999 passageiros"
+   * e o motorista via isso no dia.
+   *
+   * E um numero negativo caia no || 1, o que escondia o erro em
+   * vez de o dizer.
+   */
+  const passengers = Math.max(1, Math.min(16,
+    parseInt(booking.passengers, 10) || 1
+  ));
   const currency = (booking.currency || 'EUR').toUpperCase();
   const { rates } = await loadExchangeRates();
 
@@ -3152,12 +3165,28 @@ async function criarSessaoCheckout(req, res) {
 
   // A volta é a mesma rota ao contrário, noutra data. Vem como um
   // objeto à parte porque cada perna é uma reserva independente.
+  /**
+   * A volta e a mesma rota ao contrario. Sempre.
+   *
+   * O browser podia mandar moradas diferentes na volta — e o
+   * preco era o da ida:
+   *
+   *   ida:    Faro -> Albufeira      38 km,  47 EUR
+   *   volta:  Albufeira -> Lisboa   280 km, 370 EUR
+   *   cobrado: 94 EUR
+   *
+   * Uma volta para outro sitio e outra viagem, e paga-se como
+   * outra viagem. Quem precisa disso faz duas reservas.
+   *
+   * O que o browser escolhe e a DATA e a HORA. As moradas vem da
+   * ida, invertidas.
+   */
   const ret = booking.return_leg && booking.return_leg.date
     ? {
         date: booking.return_leg.date,
         time: booking.return_leg.time,
-        pickup: booking.return_leg.pickup || booking.dropoff,
-        dropoff: booking.return_leg.dropoff || booking.pickup
+        pickup: booking.dropoff,
+        dropoff: booking.pickup
       }
     : null;
 
@@ -3185,8 +3214,43 @@ async function criarSessaoCheckout(req, res) {
   const pickupTime = booking.booking_time || booking.time || '00:00';
   const pickupAt = new Date(`${pickupDate}T${pickupTime}`);
 
-  if (Number.isFinite(pickupAt.getTime()) &&
-      pickupAt.getTime() < Date.now() + BOOKING_BUFFER_MINUTES * 60000) {
+  /**
+   * Uma data invalida NAO passa.
+   *
+   * A verificacao era "se a data e valida E esta demasiado perto,
+   * recusa". Uma data que nao existe — "abc", um campo vazio, um
+   * mes 13 — tornava a primeira metade falsa e o if nao entrava.
+   *
+   * Passava para o Stripe, e a reserva ficava com uma data que
+   * ninguem consegue ler. Nenhuma tarefa a encontra: nem a
+   * cobranca, nem os lembretes, nem a distribuicao.
+   */
+  if (!Number.isFinite(pickupAt.getTime())) {
+    return res.status(400).json({
+      error: 'That date does not look right. Pick a date and time.',
+      field_error: true
+    });
+  }
+
+  /**
+   * E nao daqui a dez anos.
+   *
+   * Uma reserva para 2099 fica no sistema para sempre: o cartao
+   * guardado expira muito antes, e a tarefa de cobranca corre
+   * todos os dias sem nunca a apanhar.
+   *
+   * Dois anos cobre qualquer reserva a serio.
+   */
+  const DOIS_ANOS = 2 * 365 * 24 * 3600 * 1000;
+
+  if (pickupAt.getTime() > Date.now() + DOIS_ANOS) {
+    return res.status(400).json({
+      error: 'We only take bookings up to two years ahead.',
+      field_error: true
+    });
+  }
+
+  if (pickupAt.getTime() < Date.now() + BOOKING_BUFFER_MINUTES * 60000) {
     return res.status(400).json({
       error: `We need at least ${BOOKING_BUFFER_MINUTES} minutes to arrange a driver. ` +
              'Please choose a later pick-up time.'
