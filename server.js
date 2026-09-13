@@ -3286,7 +3286,23 @@ async function criarSessaoCheckout(req, res) {
 
   const metadata = {
     email: booking.email || '',
-    user_id: booking.user_id || '',
+
+    /**
+     * O user_id vem do JWT, nao do browser.
+     *
+     * Vinha de booking.user_id. A politica de leitura da bookings
+     * inclui "auth.uid() = user_id" — quem pusesse o id de outra
+     * pessoa criava uma reserva que ESSA pessoa conseguia ler,
+     * com moradas, telefone e numero de voo.
+     *
+     * E ao contrario: pondo o id de um estranho, a reserva
+     * desaparecia da conta de quem a fez.
+     *
+     * Quem esta autenticado ja foi identificado no requester.
+     * Quem nao esta fica vazio, e o webhook cria a conta pelo
+     * email.
+     */
+    user_id: requester?.id || '',
     full_name: booking.full_name || booking.fullName || '',
     phone_code: phoneCode,
     phone_number: phoneNumber,
